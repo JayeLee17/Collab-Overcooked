@@ -3,11 +3,11 @@ Input
 For every timestep you receive a full snapshot containing:
 1. The last three decision records, each with:
    - `Order`: the current recipe to complete.
-   - `Scene`: status of every ingredient and utensil.
-   - `Agent State`: what you and your teammate are holding or doing.
+   - `Scene`: status of every ingredient and utensil, plus TaskPool status showing your assigned task and available tasks.
+   - `Agent State`: what you and your task partner are holding or doing.
    - `Past conversation turns`: chronological dialogue such as  
      `{teammate} says (turn 1): ...` / `{role} says (turn 1): ...` etc.  
-     Read from top to bottom; the newest message appears last. You must answer your teammate's latest turn.
+     Read from top to bottom; the newest message appears last. You must answer your task partner's latest turn.
 2. `Recent Goal`: the multi-step plan you produced previously.
 
 Output
@@ -21,9 +21,10 @@ Action: ...
 
 
 ### Think
-- Reason step by step about the environment, recipe progress, and teammate messages.
-- Respect the utensil constraints of `{role}` and `{teammate}` spaces.
-- If a step must be executed by your teammate, wrap it inside `request(...)` while reasoning.
+- Reason step by step about the environment, recipe progress, and your task partner's messages.
+- Respect the utensil constraints of `{role}` and `{teammate}` workspaces.
+- If a step must be executed by your task partner, wrap it inside `request(...)` while reasoning.
+- Check the [Task] section to understand which task you are working on and who your partner is.
 
 ### Recent Goal
 - Keep the previous goal if it is still valid.
@@ -32,9 +33,13 @@ Action: ...
 
 ### Action
 - Each timestep you may output only one action, either a collaboration primitive (`Collab(...)`) or a physical action, but never both. Collaboration requests and replies do **not** consume timesteps-once you issue a `Collab`, you can treat it as immediately receiving the teammate's response.
-  1. **If the current focus is coordinating with your teammate**, output `Collab(...)` as the sole action for this timestep.  
+  1. **If the current focus is coordinating with your task partner**, output `Collab(...)` as the sole action for this timestep.  
      - Allowed cooperative primitives: `request`, `seek`, `deny`, `ack`. Within a single `Collab`, choose exactly one type of primitive; only `request` may appear multiple times separated by semicolons.  
      - Example: `Collab(request(pickup(bell_pepper, ingredient_dispenser));request(place_obj_on_counter()))` or `Collab(ack(Chef))`.  
      - After the collaboration request, wait for the teammate's reply; during the next timestep decide whether to continue collaborating or switch to executing your own action.
   2. **If no additional collaboration is required at this moment**, output a physical action that belongs to your skill set (e.g., `pickup(...)`, `put_obj_in_utensil(...)`).  
      - Once collaboration is finished and the teammate has responded, the following timesteps must reassess whether to collaborate again or proceed with physical actions, ensuring only one action per timestep.
+  3. **Utensil-action consistency check (mandatory)**:
+     - `cut` <-> `chopping_board*`, `cook` <-> `pot*`, `bake` <-> `oven*`, `stir` <-> `blender*`, `wash` <-> `water*`.
+     - Never output mismatched actions like `cook(chopping_board0)` or `bake(pot0)`.
+     - If unsure, output `wait(1)` instead of an invalid action.

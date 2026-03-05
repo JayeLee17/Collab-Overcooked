@@ -39,6 +39,19 @@ def wait(num):
     # wait positive num timesteps
     if isinstance(num, int) and 0 < num <= 20:
         return
+
+**Strict utensil-action mapping (MUST follow):**
+- `cook()` can ONLY target `pot*`
+- `bake()` can ONLY target `oven*`
+- `cut()` can ONLY target `chopping_board*`
+- `stir()` can ONLY target `blender*`
+- `wash()` can ONLY target `water*`
+- Invalid example: `cook(chopping_board0)`, `bake(pot0)`, `stir(oven0)`
+
+Before outputting `Action: ...`, run this check:
+1) Is my action in allowed action list?  
+2) If targeting a utensil, does verb match utensil type exactly?  
+If not, replace with a valid action or `wait(1)`.
 **'Cooperative action'**:  
 Use `Collab(...)` to express cooperation within a timestep. Collaboration does not consume extra timesteps: once you emit a `Collab`, treat it as if the teammate instantly replied. A `Collab` can only contain **one** primitive type; only `request` may appear multiple times separated by semicolons. Examples:
 - `Collab(request(Assistant,pickup(bell_pepper, ingredient_dispenser));request(Assistant,place_obj_on_counter()))`

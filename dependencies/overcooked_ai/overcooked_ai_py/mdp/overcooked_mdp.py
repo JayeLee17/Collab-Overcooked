@@ -226,7 +226,7 @@ class OvercookedState(object):
         self.objects = objects
         self.order_list = order_list
         self.timestep = timestep # The current timestep of the state
-        self.ml_actions = [None, None] # I add to restore the ml_actions in t-1
+        self.ml_actions = [None] * len(players) # I add to restore the ml_actions in t-1
         self.communicate_history = []
         self.error_message = []
 
@@ -536,6 +536,13 @@ class OvercookedGridworld(object):
         self.init_utensil_states()
         self.all_ingredients = self.Recipe.recipe_name+self.default_ingredients
         self.one_task_mode = False
+        # 盘子管理参数（可以从 layout 文件或运行参数传入，通过 kwargs）
+        self.max_clean_dishes = kwargs.get('max_clean_dishes', 4)  # 默认上限4
+        self.wash_time = kwargs.get('wash_time', 5)  # 默认清洗时间5步
+
+        # 盘子状态
+        self.clean_dishes_available = self.max_clean_dishes  # 当前可用干净盘子数
+        self.washing_jobs = []  # 正在清洗的任务：[{"finish_time": int}, ...]
 
 
     def generate_utensil_list(self):
@@ -1059,8 +1066,24 @@ class OvercookedGridworld(object):
         # Finally, environment effects
         sparse_reward += self.step_environment_effects(new_state) ## realy important, include add timestep
 
+        # 【新增】结算W处的清洗任务（在 timestep 更新之后）
+        if hasattr(self, 'washing_jobs') and hasattr(self, 'clean_dishes_available'):
+            remaining_jobs = []
+            for job in self.washing_jobs:
+                if job["finish_time"] <= new_state.timestep:
+                    # 清洗完成，D处可用盘子+1（不超过上限）
+                    if self.clean_dishes_available < self.max_clean_dishes:
+                        self.clean_dishes_available += 1
+                        # 可选：打印日志用于调试
+                        # print(f"[Wash] timestep {new_state.timestep}: 清洗完成！D处可用盘子+1，当前: {self.clean_dishes_available}/{self.max_clean_dishes}")
+                else:
+                    # 还没洗完，保留任务
+                    remaining_jobs.append(job)
+            self.washing_jobs = remaining_jobs
+
         # Additional dense reward logic
         # shaped_reward += self.calculate_distance_based_shaped_reward(state, new_state)
+        
 
         return new_state, sparse_reward, shaped_reward
 
@@ -1084,7 +1107,7 @@ class OvercookedGridworld(object):
         # cooking_pots = ready_pots + pot_states["tomato"]["cooking"] + pot_states["onion"]["cooking"]
         # nearly_ready_pots = cooking_pots + pot_states["tomato"]["partially_full"] + pot_states["onion"]["partially_full"]
 
-        sparse_reward, shaped_reward, ml_actions = 0, 0, [None, None]
+        sparse_reward, shaped_reward, ml_actions = 0, 0, [None] * self.num_players
         for i, (player, action) in enumerate(zip(new_state.players, joint_action)):
             if action != Action.INTERACT:
                 continue
@@ -1109,13 +1132,21 @@ class OvercookedGridworld(object):
             #     ml_actions[i] = 'pickup_tomato'
                     
             elif terrain_type == 'D' and player.held_object is None:
-                dishes_already = len(new_state.player_objects_by_type['dish'])
-                player.set_object(ObjectState('dish', 'dish', pos))
-                ml_actions[i] = 'pickup(dish, dish_dispenser)'
+                # 只有有“干净盘子库存”时，才允许从 D 取盘子
+                if self.clean_dishes_available > 0:
+                    self.clean_dishes_available -= 1  # 取走一个盘子
 
-                dishes_on_counters = self.get_counter_objects_dict(new_state)["dish"]
-                if len(nearly_ready_pots) > dishes_already and len(dishes_on_counters) == 0:
-                    shaped_reward += self.reward_shaping_params["DISH_PICKUP_REWARD"]
+                    dishes_already = len(new_state.player_objects_by_type['dish'])
+                    player.set_object(ObjectState('dish', 'dish', pos))
+                    ml_actions[i] = 'pickup(dish, dish_dispenser)'
+
+                    dishes_on_counters = self.get_counter_objects_dict(new_state)["dish"]
+                    if len(nearly_ready_pots) > dishes_already and len(dishes_on_counters) == 0:
+                        shaped_reward += self.reward_shaping_params["DISH_PICKUP_REWARD"]
+                else:
+                    # 没有盘子可用：可以什么都不做，或者标记成 wait
+                    # ml_actions[i] = 'wait()'
+                    pass
 
             elif terrain_type == 'I' and player.held_object is None and parm[i] is not None:
                 ingredient = parm[i]
@@ -1248,7 +1279,14 @@ class OvercookedGridworld(object):
 
                     new_state, delivery_rew = self.deliver_soup(new_state, player, obj)
                     sparse_reward += delivery_rew   
-                    ml_actions[i] = f'deliver_soup()'                     
+                    ml_actions[i] = f'deliver_soup()'
+
+                    # >>> 在这里触发一次“洗盘子”任务 <<<
+                    if not hasattr(self, "washing_jobs"):
+                        self.washing_jobs = []
+                    finish_time = new_state.timestep + self.wash_time   # self.wash_time 你在 __init__ 里定义
+                    self.washing_jobs.append({"finish_time": finish_time})
+                                
 
                     # If last soup necessary was delivered, stop resolving interacts
                     if new_state.order_list is not None and len(new_state.order_list) == 0:
@@ -1310,6 +1348,12 @@ class OvercookedGridworld(object):
 
     def compute_new_positions_and_orientations(self, old_player_states, joint_action):
         """Compute new positions and orientations ignoring collisions"""
+        # Ensure joint_action matches the number of players
+        if len(joint_action) != len(old_player_states):
+            raise ValueError(f"joint_action length ({len(joint_action)}) doesn't match player_states length ({len(old_player_states)})")
+        if len(old_player_states) != self.num_players:
+            raise ValueError(f"old_player_states length ({len(old_player_states)}) doesn't match num_players ({self.num_players})")
+        
         new_positions, new_orientations = list(zip(*[
             self._move_if_direction(p.position, p.orientation, a) \
             for p, a in zip(old_player_states, joint_action)]))
@@ -1318,11 +1362,10 @@ class OvercookedGridworld(object):
         return new_positions, new_orientations
 
     def is_transition_collision(self, old_positions, new_positions):
-        # Checking for any players ending in same square
-        if self.is_joint_position_collision(new_positions):
-            return True
-        # Check if any two players crossed paths
-        for idx0, idx1 in itertools.combinations(range(self.num_players), 2):
+        # Per design: agents can share the same cell (no same-cell collision).
+        # Only check for path-swap collisions (agents crossing each other simultaneously).
+        num_positions = len(new_positions)
+        for idx0, idx1 in itertools.combinations(range(num_positions), 2):
             p1_old, p2_old = old_positions[idx0], old_positions[idx1]
             p1_new, p2_new = new_positions[idx0], new_positions[idx1]
             if p1_new == p2_old and p1_old == p2_new:
@@ -1330,7 +1373,9 @@ class OvercookedGridworld(object):
         return False
 
     def is_joint_position_collision(self, joint_position):
-        return any(pos0 == pos1 for pos0, pos1 in itertools.combinations(joint_position, 2))
+        # Per design: agents are allowed to share positions (co-locate).
+        # This always returns False to disable same-cell collision detection.
+        return False
             
     def step_environment_effects(self, state):
         state.timestep += 1 ## that's why the state.timestep works
@@ -1394,9 +1439,17 @@ class OvercookedGridworld(object):
         return reward
 
     def _handle_collisions(self, old_positions, new_positions):
-        """If agents collide, they stay at their old locations"""
-        if self.is_transition_collision(old_positions, new_positions):
-            return old_positions
+        """
+        Handle agent movement collisions.
+        Per design: agents can share (co-locate) the same cell — no same-cell collision.
+        Only prevent swap collisions (agents crossing paths simultaneously).
+        """
+        # Only block path-swapping (agent A moves to B's old pos while B moves to A's old pos)
+        for idx0, idx1 in itertools.combinations(range(len(new_positions)), 2):
+            p1_old, p2_old = old_positions[idx0], old_positions[idx1]
+            p1_new, p2_new = new_positions[idx0], new_positions[idx1]
+            if p1_new == p2_old and p1_old == p2_new:
+                return old_positions  # prevent swap
         return new_positions
 
     def _get_terrain_type_pos_dict(self):
@@ -1445,10 +1498,14 @@ class OvercookedGridworld(object):
             # Check that non-held objects are on terrain
             assert self.get_terrain_type_at_pos(obj_pos) != ' '
 
-        # Check that players and non-held objects don't overlap
-        all_pos = [player_state.position for player_state in state.players]
-        all_pos += [obj_state.position for obj_state in state.objects.values()]
-        assert len(all_pos) == len(set(all_pos)), "Overlapping players or objects"
+        # Check that non-held objects don't overlap with each other
+        # Note: agents are allowed to co-locate (share the same cell) per design
+        obj_positions = [obj_state.position for obj_state in state.objects.values()]
+        assert len(obj_positions) == len(set(obj_positions)), "Overlapping objects"
+        # Check that players don't overlap with non-held objects (but can overlap with each other)
+        player_positions = set(player_state.position for player_state in state.players)
+        for obj_pos in obj_positions:
+            assert obj_pos not in player_positions, f"Player and object overlap at {obj_pos}"
 
         # Check that objects have a valid state
         for obj_state in all_objects:
@@ -1475,7 +1532,7 @@ class OvercookedGridworld(object):
 
         # Borders must not be free spaces
         def is_not_free(c):
-            return c in 'XOPDSTICB'  # Add ingredient grid
+            return c in 'XOPDSTICBW'  # Add ingredient grid
 
         for y in range(height):
             assert is_not_free(grid[y][0]), 'Left border must not be free'
@@ -1493,7 +1550,7 @@ class OvercookedGridworld(object):
         assert layout_digits == list(range(1, num_players + 1)), "Some players were missing"
 
         # add ingredient
-        assert all(c in 'XOPCDSTIB123456789 ' for c in all_elements), 'Invalid character in grid'
+        assert all(c in 'XOPCDSTIBW123456789 ' for c in all_elements), 'Invalid character in grid'
         assert all_elements.count('1') == 1, "'1' must be present exactly once"
         assert all_elements.count('D') >= 1, "'D' must be present at least once"
         assert all_elements.count('S') >= 1, "'S' must be present at least once"
@@ -1508,28 +1565,25 @@ class OvercookedGridworld(object):
     
     def state_string(self, state):
         """String representation of the current state"""
-        players_dict = {player.position: player for player in state.players}
+        # Use a list-based mapping to support multiple agents co-locating on the same cell
+        from collections import defaultdict
+        players_at_pos = defaultdict(list)
+        for i, player in enumerate(state.players):
+            players_at_pos[player.position].append((i, player))
 
         grid_string = ""
         for y, terrain_row in enumerate(self.terrain_mtx):
             for x, element in enumerate(terrain_row):
                 grid_string_add = ""
-                if (x, y) in players_dict.keys():
-                    player = players_dict[(x, y)]
+                if (x, y) in players_at_pos:
+                    # Display the first agent at this position (lowest index)
+                    player_idx, player = players_at_pos[(x, y)][0]
                     orientation = player.orientation
                     assert orientation in Direction.ALL_DIRECTIONS
 
                     grid_string_add += Action.ACTION_TO_CHAR[orientation]
                     player_object = player.held_object
-                    # if player_object:
-                    #     grid_string_add += player_object.name[:1]
-                    # else:
-                    #     player_idx_lst = [i for i, p in enumerate(state.players) if p.position == player.position]
-                    #     assert len(player_idx_lst) == 1
-                    #     grid_string_add += str(player_idx_lst[0])
-                    player_idx_lst = [i for i, p in enumerate(state.players) if p.position == player.position]
-                    assert len(player_idx_lst) == 1
-                    grid_string_add += str(player_idx_lst[0])
+                    grid_string_add += str(player_idx)
                     if player_object:
                         grid_string_add += player_object.name[:1]
                 else:

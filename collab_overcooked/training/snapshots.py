@@ -10,7 +10,7 @@ from overcooked_ai_py.mdp.overcooked_mdp import OvercookedState
 def serialize_env_state(state: OvercookedState) -> Dict[str, Any]:
     """Serialize :class:`OvercookedState` (including auxiliary fields)."""
     payload = state.to_dict()
-    payload["ml_actions"] = list(getattr(state, "ml_actions", [None, None]))
+    payload["ml_actions"] = list(getattr(state, "ml_actions", [None] * len(state.players)))
     payload["communicate_history"] = list(
         getattr(state, "communicate_history", []) or []
     )

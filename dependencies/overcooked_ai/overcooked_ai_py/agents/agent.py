@@ -61,7 +61,14 @@ class AgentGroup(object):
     def reset(self):
         for a in self.agents:
             index = a.agent_index
-            a.reset(self.agents[1-index])
+            # Get all other agents as teammates (supporting multiple agents)
+            teammates = [other_agent for i, other_agent in enumerate(self.agents) if i != index]
+            if len(teammates) == 1:
+                # Backward compatibility: single teammate
+                a.reset(teammates[0])
+            else:
+                # Multiple teammates: pass list of teammates
+                a.reset(teammates)
     def reset_dialogue(self):
         dialogue = []
         for a in self.agents:

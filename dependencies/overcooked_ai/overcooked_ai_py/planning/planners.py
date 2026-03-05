@@ -318,11 +318,17 @@ class JointMotionPlanner(object):
         # Single agent motion planner
         self.motion_planner = MotionPlanner(mdp, counter_goals=params["counter_goals"])
 
-        # Graph problem that returns optimal paths from 
-        # starting positions to goal positions (without
-        # accounting for orientations)
-        self.joint_graph_problem = self._joint_graph_from_grid()
-        self.all_plans = self._populate_all_plans(debug)
+        if mdp.num_players <= 2:
+            # Original behavior for 2 players: pre-compute all joint plans
+            self.joint_graph_problem = self._joint_graph_from_grid()
+            self.all_plans = self._populate_all_plans(debug)
+        else:
+            # For > 2 players, skip expensive joint pre-computation
+            # The joint graph grows as O(positions^num_players) which is infeasible
+            # LLMAgents only uses single-agent MotionPlanner for pathfinding
+            print(f"[Planner] 跳过联合运动规划预计算（{mdp.num_players}个玩家，使用单智能体规划）")
+            self.joint_graph_problem = None
+            self.all_plans = {}
 
     def get_low_level_action_plan(self, start_jm_state, goal_jm_state):
         """
@@ -377,17 +383,76 @@ class JointMotionPlanner(object):
         all_plans = {}
 
         # Joint states are valid if players are not in same location
+        num_players = self.mdp.num_players
+        if debug or num_players > 2:
+            print(f"[Planner] 步骤1/4: 计算起始状态...")
+        
         if self.start_orientations:
             valid_joint_start_states = self.mdp.get_valid_joint_player_positions_and_orientations()
         else:
             valid_joint_start_states = self.mdp.get_valid_joint_player_positions()
 
+        if debug or num_players > 2:
+            print(f"[Planner] 步骤2/4: 计算玩家有效位置...")
+        
         valid_player_states = self.mdp.get_valid_player_positions_and_orientations()
-        possible_joint_goal_states = list(itertools.product(valid_player_states, repeat=2))
-        valid_joint_goal_states = list(filter(self.is_valid_joint_motion_goal, possible_joint_goal_states))
+        
+        if debug or num_players > 2:
+            import sys
+            print(f"[Planner] 步骤3/4: 生成目标状态组合（这可能需要一些时间）...")
+            print(f"[Planner] 有效位置数: {len(valid_player_states)}, 玩家数: {num_players}")
+            estimated_combinations = len(valid_player_states) ** num_players
+            print(f"[Planner] 将生成约 {estimated_combinations:,} 个可能的目标状态组合...")
+            sys.stdout.flush()
+        
+        # Support multiple players (not just 2)
+        # 对于大量组合，直接生成列表可能会很慢，但这是必要的
+        if debug or num_players > 2:
+            print(f"[Planner] 正在生成目标状态组合（这一步可能需要几分钟）...")
+            sys.stdout.flush()
+        
+        possible_joint_goal_states = list(itertools.product(valid_player_states, repeat=num_players))
+        
+        if debug or num_players > 2:
+            print(f"[Planner] ✓ 已生成 {len(possible_joint_goal_states):,} 个目标状态组合")
+            print(f"[Planner] 步骤4/4: 过滤有效目标状态（这可能需要较长时间）...")
+            sys.stdout.flush()
+        
+        # 使用循环添加进度提示
+        valid_joint_goal_states = []
+        filter_count = 0
+        total_to_filter = len(possible_joint_goal_states)
+        for goal_state in possible_joint_goal_states:
+            if self.is_valid_joint_motion_goal(goal_state):
+                valid_joint_goal_states.append(goal_state)
+            filter_count += 1
+            if (debug or num_players > 2) and filter_count % max(1, total_to_filter // 20) == 0:
+                progress = (filter_count / total_to_filter) * 100
+                print(f"[Planner] 过滤进度: {progress:.1f}% ({filter_count:,}/{total_to_filter:,})")
+                sys.stdout.flush()
 
-        if debug: print("Number of plans being pre-calculated: ", len(valid_joint_start_states) * len(valid_joint_goal_states))
+        total_plans = len(valid_joint_start_states) * len(valid_joint_goal_states)
+        if debug or num_players > 2:
+            print(f"[Planner] 开始预计算计划...")
+            print(f"[Planner] 起始状态数: {len(valid_joint_start_states)}")
+            print(f"[Planner] 目标状态数: {len(valid_joint_goal_states)}")
+            print(f"[Planner] 总计划数: {total_plans}")
+            print(f"[Planner] 这可能需要几分钟时间，请耐心等待...")
+            import sys
+            sys.stdout.flush()  # 确保输出立即显示
+        
+        plan_count = 0
+        last_progress = -1
         for joint_start_state, joint_goal_state in itertools.product(valid_joint_start_states, valid_joint_goal_states):
+            plan_count += 1
+            # 每1%显示一次进度，或者每1000个计划显示一次（取较小值）
+            progress_interval = max(1, min(total_plans // 100, 1000))
+            if (debug or num_players > 2) and plan_count % progress_interval == 0:
+                progress = (plan_count / total_plans) * 100
+                if int(progress) != last_progress:
+                    print(f"[Planner] 进度: {progress:.1f}% ({plan_count}/{total_plans})")
+                    sys.stdout.flush()
+                    last_progress = int(progress)
             
             # If orientations not present, joint_start_state just includes positions.
             if not self.start_orientations:
@@ -401,6 +466,9 @@ class JointMotionPlanner(object):
             joint_action_list, end_statuses, plan_lengths = self._obtain_plan(joint_start_state, joint_goal_state)
             plan_key = (joint_start_state, joint_goal_state)
             all_plans[plan_key] = (joint_action_list, end_statuses, plan_lengths)
+        
+        if debug or num_players > 2:
+            print(f"[Planner] 计划预计算完成！共 {len(all_plans)} 个有效计划")
         return all_plans
 
     def is_valid_jm_start_goal_pair(self, joint_start_state, joint_goal_state):
@@ -408,7 +476,8 @@ class JointMotionPlanner(object):
         if not self.is_valid_joint_motion_goal(joint_goal_state):
             return False
         check_valid_fn = self.motion_planner.is_valid_motion_start_goal_pair
-        return all([check_valid_fn(joint_start_state[i], joint_goal_state[i]) for i in range(2)])
+        num_agents = len(joint_start_state)
+        return all([check_valid_fn(joint_start_state[i], joint_goal_state[i]) for i in range(num_agents)])
 
     def _obtain_plan(self, joint_start_state, joint_goal_state):
         """Either use motion planner or actually compute a joint plan"""
@@ -549,17 +618,20 @@ class JointMotionPlanner(object):
         """Checks whether the goal joint positions and orientations are a valid goal"""
         if not self.same_motion_goals and self._agents_are_in_same_position(joint_goal_state):
             return False
-        multi_cc_map = len(self.motion_planner.graph_problem.connected_components) > 1
-        players_in_same_cc = self.motion_planner.graph_problem.are_in_same_cc(joint_goal_state[0], joint_goal_state[1])
-        if multi_cc_map and players_in_same_cc:
-            return False
+        # Connected components check only for 2-player scenarios
+        if len(joint_goal_state) <= 2:
+            multi_cc_map = len(self.motion_planner.graph_problem.connected_components) > 1
+            players_in_same_cc = self.motion_planner.graph_problem.are_in_same_cc(joint_goal_state[0], joint_goal_state[1])
+            if multi_cc_map and players_in_same_cc:
+                return False
         return all([self.motion_planner.is_valid_motion_goal(player_state) for player_state in joint_goal_state])
 
     def is_valid_joint_motion_pair(self, joint_start_state, joint_goal_state):
         if not self.is_valid_joint_motion_goal(joint_goal_state):
             return False
+        num_agents = len(joint_start_state)
         return all([ \
-            self.motion_planner.is_valid_motion_start_goal_pair(joint_start_state[i], joint_goal_state[i]) for i in range(2)])
+            self.motion_planner.is_valid_motion_start_goal_pair(joint_start_state[i], joint_goal_state[i]) for i in range(num_agents)])
 
     def _agents_are_in_same_position(self, joint_motion_state):
         agent_positions = [player_pos_and_or[0] for player_pos_and_or in joint_motion_state]
@@ -664,7 +736,9 @@ class JointMotionPlanner(object):
         """Get all joint positions that can be reached by a joint action.
         NOTE: this DOES NOT include joint positions with superimposed agents."""
         successor_joint_positions = {}
-        joint_motion_actions = itertools.product(Action.MOTION_ACTIONS, Action.MOTION_ACTIONS)
+        # Support multiple players (not just 2)
+        num_players = len(starting_positions)
+        joint_motion_actions = itertools.product(*([Action.MOTION_ACTIONS] * num_players))
         
         # Under assumption that orientation doesn't matter
         dummy_orientation = Direction.NORTH
@@ -736,8 +810,9 @@ class MediumLevelActionManager(object):
 
     def joint_ml_actions(self, state):
         """Determine all possible joint medium level actions for a certain state"""
-        agent1_actions, agent2_actions = tuple(self.get_medium_level_actions(state, player) for player in state.players)
-        joint_ml_actions = list(itertools.product(agent1_actions, agent2_actions))
+        # Support multiple players (not just 2)
+        agent_actions_list = tuple(self.get_medium_level_actions(state, player) for player in state.players)
+        joint_ml_actions = list(itertools.product(*agent_actions_list))
         
         # ml actions are nothing but specific joint motion goals
         valid_joint_ml_actions = list(filter(lambda a: self.is_valid_ml_action(state, a), joint_ml_actions))
@@ -746,14 +821,20 @@ class MediumLevelActionManager(object):
         # Necessary to prevent states without successors (due to no counters being allowed and no wait actions)
         # causing A* to not find a solution
         if len(valid_joint_ml_actions) == 0:
-            agent1_actions, agent2_actions = tuple(self.get_medium_level_actions(state, player, waiting_substitute=True) for player in state.players)
-            joint_ml_actions = list(itertools.product(agent1_actions, agent2_actions))
+            agent_actions_list = tuple(self.get_medium_level_actions(state, player, waiting_substitute=True) for player in state.players)
+            joint_ml_actions = list(itertools.product(*agent_actions_list))
             valid_joint_ml_actions = list(filter(lambda a: self.is_valid_ml_action(state, a), joint_ml_actions))
             if len(valid_joint_ml_actions) == 0:
                 print("WARNING: Found state without valid actions even after adding waiting substitute actions. State: {}".format(state))
         return valid_joint_ml_actions
 
     def is_valid_ml_action(self, state, ml_action):
+        if self.mdp.num_players > 2:
+            # For multi-agent, check individual goal validity (no joint graph available)
+            return all([
+                self.joint_motion_planner.motion_planner.is_valid_motion_goal(goal)
+                for goal in ml_action
+            ])
         return self.joint_motion_planner.is_valid_jm_start_goal_pair(state.players_pos_and_or, ml_action)
 
     def get_medium_level_actions(self, state, player, waiting_substitute=False):
@@ -837,7 +918,17 @@ class MediumLevelActionManager(object):
             
         
         visitable_cur = get_visitable_positions(player_positions[player_index], self.mdp)  
-        visitable_oth = get_visitable_positions(player_positions[1 - player_index], self.mdp) 
+        # Support multiple agents: use first other agent for compatibility, or skip if only one agent
+        num_players = len(player_positions)
+        if num_players <= 2:
+            visitable_oth = get_visitable_positions(player_positions[1 - player_index], self.mdp)
+        else:
+            # For multi-agent, use first other agent (or skip the check if not critical)
+            other_indices = [i for i in range(num_players) if i != player_index]
+            if other_indices:
+                visitable_oth = get_visitable_positions(player_positions[other_indices[0]], self.mdp)
+            else:
+                visitable_oth = [] 
 
         separate_states = [] 
         
@@ -852,10 +943,19 @@ class MediumLevelActionManager(object):
             if flag_cur == True and flag_oth == False:  
                 separate_states.append(loc)   
         
-        if len(separate_states) == 0:  
-            return self._get_ml_actions_for_positions(obj_locations)
-        else: 
-            return self._get_ml_actions_for_positions(separate_states)
+        # Get all possible motion goals for the object locations
+        all_motion_goals = self._get_ml_actions_for_positions(separate_states if len(separate_states) > 0 else obj_locations)
+        
+        # Filter motion goals: only keep those where the goal position is in visitable_cur
+        # This ensures that motion goals are only generated for positions the agent can actually reach
+        # Note: Even if other agents are at those positions, they don't block pathfinding (block_other_agent=False)
+        filtered_motion_goals = []
+        for mg in all_motion_goals:
+            mg_pos = mg[0]  # motion goal position
+            if mg_pos in visitable_cur:
+                filtered_motion_goals.append(mg)
+        
+        return filtered_motion_goals
     
     def go_to_utensil_actions(self,state:OvercookedState,utensil,player_index):
         player_positions = state.players_pos_and_or
@@ -873,7 +973,16 @@ class MediumLevelActionManager(object):
         obj_locations = [tuple(obj_position)]
         
         visitable_cur = get_visitable_positions(player_positions[player_index], self.mdp)  
-        visitable_oth = get_visitable_positions(player_positions[1 - player_index], self.mdp) 
+        # Support multiple agents: use first other agent for compatibility
+        num_players = len(player_positions)
+        if num_players <= 2:
+            visitable_oth = get_visitable_positions(player_positions[1 - player_index], self.mdp)
+        else:
+            other_indices = [i for i in range(num_players) if i != player_index]
+            if other_indices:
+                visitable_oth = get_visitable_positions(player_positions[other_indices[0]], self.mdp)
+            else:
+                visitable_oth = [] 
 
         separate_states = [] 
         
@@ -888,10 +997,19 @@ class MediumLevelActionManager(object):
             if flag_cur == True and flag_oth == False:  
                 separate_states.append(loc)   
         
-        if len(separate_states) == 0:  
-            return self._get_ml_actions_for_positions(obj_locations)
-        else: 
-            return self._get_ml_actions_for_positions(separate_states)
+        # Get all possible motion goals for the utensil locations
+        all_motion_goals = self._get_ml_actions_for_positions(separate_states if len(separate_states) > 0 else obj_locations)
+        
+        # Filter motion goals: only keep those where the goal position is in visitable_cur
+        # This ensures that motion goals are only generated for positions the agent can actually reach
+        # Note: Even if other agents are at those positions, they don't block pathfinding (block_other_agent=False)
+        filtered_motion_goals = []
+        for mg in all_motion_goals:
+            mg_pos = mg[0]  # motion goal position
+            if mg_pos in visitable_cur:
+                filtered_motion_goals.append(mg)
+        
+        return filtered_motion_goals
 
     # def pickup_onion_actions_new(self, state, counter_objects, player_positions, player_index):
     #     onion_dispenser_locations = self.mdp.get_onion_dispenser_locations()
@@ -1054,11 +1172,16 @@ class MediumLevelPlanner(object):
     @staticmethod
     def compute_mlp(filename, mdp, mlp_params):
         final_filepath = os.path.join(PLANNERS_DIR, filename)
-        # print("Computing MediumLevelPlanner to be saved in {}".format(final_filepath))
+        print(f"[Planner] 正在计算 MediumLevelPlanner，将保存到: {final_filepath}")
+        print(f"[Planner] 地图: {mdp.layout_name}, 玩家数: {mdp.num_players}")
+        if mdp.num_players > 2:
+            print(f"[Planner] 警告: {mdp.num_players} 个玩家需要大量计算，可能需要几分钟到十几分钟...")
         start_time = time.time()
         mlp = MediumLevelPlanner(mdp, mlp_params=mlp_params)
-        # print("It took {} seconds to create mlp".format(time.time() - start_time))
+        elapsed_time = time.time() - start_time
+        print(f"[Planner] 计算完成！耗时: {elapsed_time:.2f} 秒 ({elapsed_time/60:.2f} 分钟)")
         mlp.ml_action_manager.save_to_file(final_filepath)
+        print(f"[Planner] 已保存到: {final_filepath}")
         return mlp
 
     def get_low_level_action_plan(self, start_state, h_fn, delivery_horizon=4, debug=False, goal_info=False):

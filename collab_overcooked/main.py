@@ -26,16 +26,20 @@ def boolean_argument(value):
     return bool(strtobool(value))
 
 def check_recipe_parse(variant):
-    recipe_name_list = os.listdir(PROMPT_DIR+'/recipe/') 
-    recipe_filename = ""
-    for r in recipe_name_list:
-        if variant['order'] in r.lower():
-            recipe_filename = r
-            break
-    if recipe_filename == "":
-        raise ValueError("Not valid order name!")
-    else:
-        return True
+    """验证 order 或 orders 列表中每个食谱名是否有对应的 recipe prompt 文件"""
+    recipe_name_list = os.listdir(PROMPT_DIR+'/recipe/')
+    # 获取所有需要验证的 order
+    orders_to_check = variant.get('orders', [variant['order']]) if variant.get('orders') else [variant['order']]
+    
+    for order_name in orders_to_check:
+        found = False
+        for r in recipe_name_list:
+            if order_name in r.lower():
+                found = True
+                break
+        if not found:
+            raise ValueError(f"Not valid order name: '{order_name}'! Available recipes: {[r[2:-4] for r in recipe_name_list]}")
+    return True
 
 # Load YAML for new configuration system
 try:
@@ -52,12 +56,13 @@ from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
 from overcooked_ai_py.agents.agent import AgentGroup
 from overcooked_ai_py.mdp.actions import Action
 from .reward import ProcessRewardTracker
+from .task_manager import TaskPool
 
 # Import from new modular system
 try:
     from .agents import statistics_dict, turn_statistics_dict
     from .agents.web_util import output_to_port, check_port_in_use, change_port
-    from .utils import make_agent, get_example_embedding, combine_statistic_dict
+    from .utils import make_agent, get_example_embedding, combine_statistic_dict, combine_statistic_dict_multi
     
     # Define make_agent_from_config for new system
     def make_agent_from_config(agent_config, mdp, layout, history_window=0, reward_tracker=None):
@@ -80,13 +85,18 @@ try:
         mlam_params["counter_pickup"] = counter_locations
 
         # Build planner with proper counter awareness
+        # Use cache if available (force_compute=False) to avoid recomputing for multi-agent scenarios
+        # For 5 players, computing from scratch can take a very long time
+        print(f"[Planner] 正在加载/计算 MediumLevelPlanner (玩家数: {mdp.num_players})...")
         mlam = MediumLevelPlanner.from_pickle_or_compute(
-            mdp, mlam_params, force_compute=True
+            mdp, mlam_params, force_compute=False
         )
+        print(f"[Planner] MediumLevelPlanner 加载完成")
 
-        # Map role to actor name
+        # Map role to actor name (supports Chef / Assistant / Dishwasher)
         role = agent_config.get("role", "Chef")
-        actor = "chef" if role.lower() == "chef" else "assistant"
+        role_to_actor = {"chef": "chef", "assistant": "assistant", "dishwasher": "dishwasher"}
+        actor = role_to_actor.get(role.lower(), "assistant")
 
         # Backward-compatible config fields
         retrival_method = agent_config.get(
@@ -127,7 +137,7 @@ except ImportError:
     # Fallback to old system  
     from .agents.modules import statistics_dict, turn_statistics_dict
     from .agents.web_util import output_to_port, check_port_in_use, change_port
-    from .utils import make_agent, get_example_embedding, combine_statistic_dict
+    from .utils import make_agent, get_example_embedding, combine_statistic_dict, combine_statistic_dict_multi
     make_agent_from_config = None
 
 import socket
@@ -150,10 +160,19 @@ def convert_yaml_to_variant(config):
     agents_config = config.get('agents', {})
     run_config = config.get('run', {})
     
+    # 支持 orders (列表) 和 order (单个字符串) 两种配置方式
+    orders_raw = env_config.get('orders', None)
+    order_single = env_config.get('order', 'boiled_egg')
+    if orders_raw and isinstance(orders_raw, list):
+        orders_list = orders_raw
+    else:
+        orders_list = [order_single]
+
     variant = {
         'layout': env_config.get('layout', 'cramped_room'),
         'horizon': env_config.get('horizon', 10),
-        'order': env_config.get('order', 'boiled_egg'),
+        'order': orders_list[0],          # 兼容旧代码：第一个 order
+        'orders': orders_list,            # 新字段：完整 orders 列表
         'episode': config.get('episode', run_config.get('episode', 1)),
         'mode': config.get('mode', run_config.get('mode', 'exp')),
         'test_mode': config.get('test_mode', run_config.get('test_mode', 'single_task')),
@@ -173,6 +192,9 @@ def convert_yaml_to_variant(config):
         'use_new_system': True,
         'run_id': run_config.get('run_id', config.get('run_id')),
         'results_root': run_config.get('results_root', config.get('results_root', 'results')),
+        # 盘子管理参数（传递给 MDP）
+        'max_clean_dishes': env_config.get('max_clean_dishes'),
+        'wash_time': env_config.get('wash_time'),
     }
     
     return variant
@@ -199,7 +221,9 @@ def main(variant=None, config_path=None):
     layout = variant['layout']
     horizon = variant['horizon']
     episode = variant['episode']
-    order_name = variant.get('order', 'task')
+    # 多 order 时用下划线连接作为目录名
+    orders_for_name = variant.get('orders', [variant.get('order', 'task')])
+    order_name = "_".join(orders_for_name) if len(orders_for_name) <= 3 else f"{orders_for_name[0]}_x{len(orders_for_name)}"
 
     mode = variant.get('mode', 'exp')
     collab_mode = variant.get('collab_mode', 'llm').lower()
@@ -218,7 +242,14 @@ def main(variant=None, config_path=None):
     except (TypeError, ValueError):
         history_window = 0
     
-    mdp = OvercookedGridworld.from_layout_name(layout)
+    # 创建 MDP，传递盘子管理参数（如果提供）
+    mdp_params = {}
+    if variant.get('max_clean_dishes') is not None:
+        mdp_params['max_clean_dishes'] = variant['max_clean_dishes']
+    if variant.get('wash_time') is not None:
+        mdp_params['wash_time'] = variant['wash_time']
+    
+    mdp = OvercookedGridworld.from_layout_name(layout, **mdp_params)
 
     reward_tracker = None
     reward_reference_dir = Path(PROMPT_DIR) / "reference"
@@ -234,15 +265,24 @@ def main(variant=None, config_path=None):
         print(f"[ProcessRewardTracker] disabled: {exc}")
         reward_tracker = None
 
-    #set order according to parser
-    if variant['order'] !="" and check_recipe_parse(variant):
-        mdp.start_order_list = [variant['order']]
-        # 1 task mode
-        mdp.one_task_mode = True
+    # 获取 orders 列表（支持多种不同的 order）
+    orders_list = variant.get('orders', [variant['order']] if variant.get('order') else ['boiled_egg'])
+    
+    #set order according to parser — 验证所有 order 都有对应的 recipe 文件
+    if orders_list and orders_list[0] != "" and check_recipe_parse(variant):
+        mdp.start_order_list = list(orders_list)  # MDP 记录所有 order
+        mdp.one_task_mode = False  # 多任务模式
 
     env = OvercookedEnv(mdp, horizon=horizon)
     env.reset()
 
+    # --- 创建 TaskPool ---
+    num_concurrent_tasks = variant.get('yaml_config', {}).get('environment', {}).get('num_concurrent_tasks', 3)
+    max_total_tasks = variant.get('yaml_config', {}).get('environment', {}).get('max_total_tasks', 0)
+    # 用 orders 列表初始化 TaskPool（直接使用配置的 orders，不再重复）
+    task_pool = TaskPool(orders_list, num_concurrent_tasks=num_concurrent_tasks, max_total_tasks=max_total_tasks)
+    print(f"\n[TaskPool] 初始化 {len(orders_list)} 个任务 (并发={num_concurrent_tasks}, max_total={max_total_tasks}): {orders_list}")
+    print(task_pool.summary())
     
     p0_algo = variant.get('p0', 'LLMPair')
     p1_algo = variant.get('p1', 'LLMPair')
@@ -291,10 +331,10 @@ def main(variant=None, config_path=None):
                 print(env.mdp.get_utensil_states(s_t))
                 ml_actions = obs.ml_actions
                 skills = f""
-                for i, ml_action in enumerate(ml_actions):
+                for p_idx, ml_action in enumerate(ml_actions):
                     if ml_action == None:
                         continue
-                    skills += f"P{i} finished <{ml_action}>. "
+                    skills += f"P{p_idx} finished <{ml_action}>. "
                 print(skills)
 
                 r_total += reward
@@ -306,17 +346,36 @@ def main(variant=None, config_path=None):
         if variant.get('use_new_system') and make_agent_from_config:
             # Use new configuration system
             agent_configs = variant.get('agent_configs', {})
-            for i, (agent_id, agent_config) in enumerate(agent_configs.items()):
-                if agent_id.startswith('agent_'):
-                    print(f"\n----Use {agent_config.get('model', 'unknown')} ({agent_config.get('type', 'unknown')})----\n")
-                    agent = make_agent_from_config(
-                        agent_config,
-                        mdp,
-                        layout,
-                        history_window=history_window,
-                        reward_tracker=reward_tracker,
-                    )
-                    agents_list.append(agent)
+            num_agents_config = agent_configs.get('num_agents', 0)
+            
+            # 按顺序创建智能体（agent_0, agent_1, agent_2, ...）
+            for i in range(num_agents_config):
+                agent_id = f'agent_{i}'
+                if agent_id not in agent_configs:
+                    raise ValueError(f"配置文件中缺少 {agent_id} 的定义，但 num_agents={num_agents_config}")
+                
+                agent_config = agent_configs[agent_id]
+                print(f"\n----创建 {agent_id}: {agent_config.get('model', 'unknown')} ({agent_config.get('type', 'unknown')})----\n")
+                agent = make_agent_from_config(
+                    agent_config,
+                    mdp,
+                    layout,
+                    history_window=history_window,
+                    reward_tracker=reward_tracker,
+                )
+                agents_list.append(agent)
+            
+            # 验证智能体数量与地图玩家数量匹配
+            if len(agents_list) != mdp.num_players:
+                print(f"[警告] 创建的智能体数量 ({len(agents_list)}) 与地图玩家数量 ({mdp.num_players}) 不匹配！")
+                print(f"地图需要 {mdp.num_players} 个玩家，但配置了 {len(agents_list)} 个智能体")
+
+            # --- 注入 TaskPool 和角色信息到每个 Agent ---
+            for idx, agent in enumerate(agents_list):
+                agent.task_pool = task_pool
+                agent_config = agent_configs.get(f'agent_{idx}', {})
+                agent.role = agent_config.get('role', 'Chef')
+                print(f"  A{idx}({agent.role}): task_pool 已注入")
         else:
             # Use old system
             for alg in [p0_algo, p1_algo]:
@@ -363,27 +422,76 @@ def main(variant=None, config_path=None):
 
         
         if mode == 'exp':
+            # 第一个时间步：扫描并分配任务，直到所有 Assistant 和 Chef 都有任务
+            print("\n" + "="*60)
+            print("[初始任务分配] 开始扫描并分配任务...")
+            print("="*60)
+            
+            s_t = env.state
+            max_rounds = 10  # 最多扫描 10 轮，避免无限循环
+            for round_num in range(max_rounds):
+                # 让所有 agent 尝试认领任务
+                for agent_idx, agent in enumerate(team.agents):
+                    if hasattr(agent, '_try_claim_task'):
+                        agent._try_claim_task()
+                
+                # 检查是否所有 Assistant 和 Chef 都有任务
+                all_assigned = True
+                for agent_idx, agent in enumerate(team.agents):
+                    role = getattr(agent, 'role', '').lower()
+                    if role in ('assistant', 'chef'):
+                        task = task_pool.get_agent_current_task(agent_idx)
+                        if task is None:
+                            all_assigned = False
+                            break
+                
+                if all_assigned:
+                    print(f"[初始任务分配] 所有 Assistant 和 Chef 都已分配任务（第 {round_num + 1} 轮）")
+                    break
+                
+                if round_num < max_rounds - 1:
+                    print(f"[初始任务分配] 第 {round_num + 1} 轮：仍有未分配任务的 Agent，继续扫描...")
+            
+            # 输出当前各个智能体的任务状态
+            print("\n" + "="*60)
+            print("[任务分配状态] 当前各个智能体的任务:")
+            print("="*60)
+            for agent_idx, agent in enumerate(team.agents):
+                role = getattr(agent, 'role', 'Unknown')
+                task = task_pool.get_agent_current_task(agent_idx)
+                if task:
+                    partners = task_pool.get_task_teammates(agent_idx)
+                    partner_str = ", ".join(f"A{p}" for p in partners) if partners else "none"
+                    print(f"  A{agent_idx} ({role}): Task {task['id']}({task['order']}) - 伙伴: {partner_str}")
+                else:
+                    print(f"  A{agent_idx} ({role}): 无任务")
+            print("="*60 + "\n")
+            
             for t in range(horizon):
                 s_t = env.state
                 # print(s_t.timestep, env.t)
                 print(f'\n>>>>>>>>>>>>>time: {t}<<<<<<<<<<<<<<<<<<<<<\n')
                 map = env.mdp.state_string(s_t).replace('ø', 'o')
-                print(map)   
+                print(map)
+                # P1: 每 timestep 打印 TaskPool 状态
+                print(task_pool.summary())
                 a_t, ingredient_for_pickup = team.joint_action(s_t) 
                 print(a_t)
                 dialogue_t = team.reset_dialogue()
                 print(f"\n-----------Controller-----------\n")    
-                print(f"action: P0 {Action.to_char(a_t[0])} | P1 {Action.to_char(a_t[1])}")
+                # Support multiple agents - dynamically print all agent actions
+                action_str = " | ".join([f"A{i} {Action.to_char(a_t[i])}" for i in range(len(a_t))])
+                print(f"action: {action_str}")
                 parm = ingredient_for_pickup
 
                 obs, reward, done, env_info = env.step(a_t,parm)
 
                 ml_actions = obs.ml_actions
                 skills = f""
-                for i, ml_action in enumerate(ml_actions):
+                for p_idx, ml_action in enumerate(ml_actions):
                     if ml_action == None:
                         continue
-                    skills += f"P{i} finished <{ml_action}>. "
+                    skills += f"P{p_idx} finished <{ml_action}>. "
                 print(skills)
 
                 reward_info = None
@@ -393,35 +501,86 @@ def main(variant=None, config_path=None):
                     statistics_dict["process_rewards"].append(reward_info)
 
                 r_total += reward
-                if reward>0:
+
+                # P1: 每个 timestep 更新 TaskPool 洗碗任务
+                wash_time = variant.get('wash_time') or getattr(mdp, 'wash_time', 5)
+                newly_clean = task_pool.update_wash_jobs(t)
+                if newly_clean > 0:
+                    mdp.clean_dishes_available = min(
+                        mdp.clean_dishes_available + newly_clean,
+                        mdp.max_clean_dishes,
+                    )
+                    print(f"[Wash] {newly_clean} 盘洗好，当前干净盘子: {mdp.clean_dishes_available}/{mdp.max_clean_dishes}")
+
+                if reward > 0:
                     statistics_dict['total_order_finished'].append(s_t.current_k_order[0])
-                    team.agents[1].teammate_ml_actions.append({'timestamp':t,'action':"deliver_soup()"})
+                    # P1: 完成任务 + 触发洗碗
+                    # 找到刚完成 deliver 的 agent，标记其 task 完成
+                    for agent_idx, agent in enumerate(team.agents):
+                        agent_task = task_pool.get_agent_current_task(agent_idx)
+                        if agent_task is not None and agent_task["status"] in ("claimed", "in_progress"):
+                            task_pool.complete_task(agent_task["id"], t)
+                            task_pool.add_wash_job(t, wash_time)
+                            print(f"[TaskComplete] Task {agent_task['id']}({agent_task['order']}) 完成! 洗碗任务已加入队列")
+                            # P2-c: 补充新任务
+                            new_tasks = task_pool.replenish_tasks()
+                            if new_tasks:
+                                new_str = ", ".join(f"Task {nt['id']}({nt['order']})" for nt in new_tasks)
+                                print(f"[TaskPool] 补充新任务: {new_str}")
+                            print(task_pool.summary())
+                            break  # 一次 reward 只完成一个任务
+
                 rprint("[red]" + f'r: {reward} | total: {r_total}\n\n')
-                print(f"P0's real behavior: {team.agents[1].teammate_ml_actions}")
-                print(f"P1's real behavior: {team.agents[0].teammate_ml_actions}")
+                # Print behavior for all agents (supporting multiple agents)
+                for agent_idx, agent in enumerate(team.agents):
+                    if hasattr(agent, 'teammate_ml_actions'):
+                        print(f"A{agent_idx}'s real behavior: {agent.teammate_ml_actions}")
 
 
-                #save statistics 
-                turn_statistics_dict_agent0 = team.agents[0].turn_statistics_dict
-                turn_statistics_dict_agent1 = team.agents[1].turn_statistics_dict
-
-                turn_statistics_dict_both = combine_statistic_dict(turn_statistics_dict_agent0,turn_statistics_dict_agent1,map,reward)
+                #save statistics - support multiple agents
+                num_agents = len(team.agents)
+                turn_statistics_dicts = [agent.turn_statistics_dict for agent in team.agents]
+                
+                # Combine statistics for all agents
+                if num_agents == 2:
+                    # Backward compatibility: use old combine_statistic_dict for 2 agents
+                    turn_statistics_dict_both = combine_statistic_dict(
+                        turn_statistics_dicts[0], turn_statistics_dicts[1], map, reward
+                    )
+                else:
+                    # For multiple agents, combine all statistics
+                    turn_statistics_dict_both = combine_statistic_dict_multi(
+                        turn_statistics_dicts, map, reward
+                    )
+                
                 if reward_info:
                     turn_statistics_dict_both["statistical_data"]["process_reward"] = reward_info
 
                 statistics_dict['total_timestamp'].append(t)
                 statistics_dict['total_score'] = r_total
-                statistics_dict['total_action_list'][0] = team.agents[1].teammate_ml_actions
-                statistics_dict['total_action_list'][1] = team.agents[0].teammate_ml_actions
+                # Store action lists for all agents
+                statistics_dict['total_action_list'] = []
+                for agent_idx, agent in enumerate(team.agents):
+                    if hasattr(agent, 'teammate_ml_actions'):
+                        statistics_dict['total_action_list'].append(agent.teammate_ml_actions)
+                    else:
+                        statistics_dict['total_action_list'].append([])
                 statistics_dict['content'].append(turn_statistics_dict_both)
-                #statistics_dict['end_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
+                # P2-c: 保存 TaskPool 状态到统计中
+                statistics_dict['task_pool'] = task_pool.to_dict()
+                # A2A Protocol: 保存各 agent 的 A2A 消息日志（旁路记录，不影响实验逻辑）
+                statistics_dict['a2a_protocol_log'] = [
+                    agent._a2a_protocol.to_dict()
+                    for agent in team.agents
+                    if hasattr(agent, '_a2a_protocol')
+                ]
                 with open(filename, 'w') as f:
                     json.dump(statistics_dict,f,indent=4)
                 
                 if variant['test_mode'] == 'fix_task':
-                    if reward != 0:
-                        print("Task successed!")
-                        #Human-eval: set task success message
+                    # P1: 多任务模式下，所有任务完成才算成功
+                    if task_pool.all_done():
+                        print(f"All {len(task_pool.tasks)} tasks completed!")
                         if collab_mode == "human":
                             for a in range(len(team.agents)):
                                 output_to_port(

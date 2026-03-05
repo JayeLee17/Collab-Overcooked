@@ -115,6 +115,7 @@ def get_example_embedding(example_path, save_path=""):
 
 
 def combine_statistic_dict(dict1, dict2, map, score):
+    """Combine statistics for two agents (backward compatibility)"""
     rs = dict1
     rs["actions"].append(dict2["actions"][0])
     rs["map"] = map
@@ -132,4 +133,124 @@ def combine_statistic_dict(dict1, dict2, map, score):
     if "original_log" in dict2["content"]:
         rs["content"]["original_log"][1] = dict2["content"]["original_log"][1]
 
+    return rs
+
+
+def combine_statistic_dict_multi(dicts_list, map, score):
+    """Combine statistics for multiple agents"""
+    import copy
+    
+    if len(dicts_list) == 0:
+        raise ValueError("At least one agent statistics dict is required")
+    
+    if len(dicts_list) == 1:
+        rs = copy.deepcopy(dicts_list[0])
+        rs["map"] = map
+        rs["statistical_data"]["score"] = score
+        return rs
+    
+    if len(dicts_list) == 2:
+        # Use backward-compatible function for 2 agents
+        return combine_statistic_dict(dicts_list[0], dicts_list[1], map, score)
+    
+    # Start with first dict as base
+    rs = copy.deepcopy(dicts_list[0])
+    rs["map"] = map
+    rs["statistical_data"]["score"] = score
+    
+    num_agents = len(dicts_list)
+    
+    # Combine actions from all agents
+    rs["actions"] = []
+    for i, d in enumerate(dicts_list):
+        if "actions" in d and len(d["actions"]) > 0:
+            agent_action = d["actions"][0] if isinstance(d["actions"][0], list) else d["actions"]
+            rs["actions"].append(agent_action)
+        else:
+            rs["actions"].append([])
+    
+    # Combine communication, error, and error_correction for all agents
+    rs["statistical_data"]["communication"] = []
+    rs["statistical_data"]["error"] = []
+    rs["statistical_data"]["error_correction"] = []
+    
+    for i, d in enumerate(dicts_list):
+        stat_data = d.get("statistical_data", {})
+        
+        # Communication: get the entry for this agent (index 0 in the list)
+        comm = stat_data.get("communication", [])
+        if isinstance(comm, list) and len(comm) > 0:
+            rs["statistical_data"]["communication"].append(comm[0])
+        else:
+            rs["statistical_data"]["communication"].append({"call": 0, "turn": [], "token": []})
+        
+        # Error: get the entry for this agent
+        error = stat_data.get("error", [])
+        if isinstance(error, list) and len(error) > 0:
+            rs["statistical_data"]["error"].append(error[0])
+        else:
+            rs["statistical_data"]["error"].append({
+                "format_error": {"error_num": 0, "error_message": []},
+                "validator_error": {"error_num": 0, "error_message": []},
+            })
+        
+        # Error correction: get the entry for this agent
+        error_corr = stat_data.get("error_correction", [])
+        if isinstance(error_corr, list) and len(error_corr) > 0:
+            rs["statistical_data"]["error_correction"].append(error_corr[0])
+        else:
+            rs["statistical_data"]["error_correction"].append({
+                "format_correction": {"correction_num": 0, "correction_tokens": []},
+                "validator_correction": {
+                    "correction_num": 0,
+                    "reflection_obtain": [],
+                    "correction_tokens": [],
+                },
+            })
+    
+    # Combine content for all agents
+    rs["content"]["observation"] = []
+    rs["content"]["reflection"] = []
+    rs["content"]["content"] = []
+    rs["content"]["action_list"] = []
+    rs["content"]["original_log"] = []
+    
+    for i, d in enumerate(dicts_list):
+        content = d.get("content", {})
+        
+        # Observation
+        obs = content.get("observation", [])
+        if isinstance(obs, list) and len(obs) > 0:
+            rs["content"]["observation"].append(obs[0])
+        else:
+            rs["content"]["observation"].append([])
+        
+        # Reflection
+        refl = content.get("reflection", [])
+        if isinstance(refl, list) and len(refl) > 0:
+            rs["content"]["reflection"].append(refl[0])
+        else:
+            rs["content"]["reflection"].append([])
+        
+        # Content
+        cont = content.get("content", [])
+        if isinstance(cont, list) and len(cont) > 0:
+            rs["content"]["content"].append(cont[0])
+        else:
+            rs["content"]["content"].append([])
+        
+        # Action list
+        act_list = content.get("action_list", [])
+        if isinstance(act_list, list) and len(act_list) > 0:
+            rs["content"]["action_list"].append(act_list[0])
+        else:
+            rs["content"]["action_list"].append([])
+        
+        # Original log
+        orig_log = content.get("original_log", [])
+        if isinstance(orig_log, list) and len(orig_log) > 0:
+            rs["content"]["original_log"].append(orig_log[0])
+        else:
+            rs["content"]["original_log"].append([])
+    
     return rs

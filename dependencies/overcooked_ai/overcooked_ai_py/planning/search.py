@@ -105,8 +105,17 @@ class Node:
     def __eq__(self, other):
         return self.position == other.position
     
-def find_path(start_pos_and_or, other_pos_and_or, goal, terrain_mtx):  
+def find_path(start_pos_and_or, other_pos_and_or, goal, terrain_mtx, block_other_agent=True):  
+    """
+    Find path from start to goal using BFS.
     
+    Args:
+        start_pos_and_or: Starting position and orientation
+        other_pos_and_or: Other agent's position and orientation (for blocking)
+        goal: Goal position and orientation
+        terrain_mtx: Terrain matrix
+        block_other_agent: If True, block other agent's position. If False, allow agents to share positions.
+    """
     start_node = Node(None, start_pos_and_or)  
     end_node   = Node(None, goal)
 
@@ -122,7 +131,10 @@ def find_path(start_pos_and_or, other_pos_and_or, goal, terrain_mtx):
     n_cols = terrain_mtx['width']    
     mtx = terrain_mtx['matrix'] 
 
-    mtx[other_pos_and_or[0][1]][other_pos_and_or[0][0]] = 'B' 
+    # Only block other agent's position if block_other_agent is True
+    # This allows multiple agents to share the same position (no collision)
+    if block_other_agent:
+        mtx[other_pos_and_or[0][1]][other_pos_and_or[0][0]] = 'B' 
 
     yet_to_visit_list.append(start_node)   
 

@@ -4,10 +4,20 @@
 
 # Environment settings
 environment:
-  horizon: 10
-  order: "boiled_egg"  # Available: boiled_egg, soup, salad
-  layout: "cramped_room"  # Available: cramped_room, coordination_ring, etc.
+  horizon: 400           # 多任务场景需要更多步数
+  # 方式1: 单一 order（所有任务都做同一个菜）
+  # order: "boiled_egg"
+  # 方式2: orders 列表（每个任务做不同的菜，会轮转补充）
+  orders:
+    - "boiled_egg"
+    - "baked_carrot_soup"
+  layout: "multi_agent_map"  # Available: cramped_room, multi_agent_map, coordination_ring, etc.
   max_steps: 400
+  num_concurrent_tasks: 2    # 同时保持的活跃任务数量
+  max_total_tasks: 2         # 最大总任务数（0=无限制，仅完成初始任务后补充）
+  # 盘子管理参数（仅在使用支持W符号的地图时有效）
+  max_clean_dishes: 6        # D处盘子数量上限
+  wash_time: 5               # W处清洗时间（步数）
 
 # Runtime / control loop settings
 run:
@@ -22,27 +32,57 @@ run:
   
 # Agent settings
 agents:
-  num_agents: 2
+  num_agents: 5  # 匹配 multi_agent_map 地图的5个玩家位置
   agent_0:
     type: "custom_api"  # openai, vllm, custom_api
     model: "gpt-4o"
-    api_key: ""  # Required for OpenAI/custom API
-    base_url: "https://api.openai.com/v1"  # Optional for OpenAI, required for custom_api
+    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
+    base_url: "https://api2.aigcbest.top/v1"  # Optional for OpenAI, required for custom_api
     temperature: 0.1
     max_tokens: 512
     timeout: 30
     max_retries: 3
-    role: "Chef"
+    role: "Chef"  # A0: Chef
   agent_1:
     type: "custom_api"
-    model: "gpt-3.5-turbo"
-    api_key: ""  # Required for OpenAI/custom API
-    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
+    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
+    base_url: "https://api2.aigcbest.top/v1"
     temperature: 0.1
     max_tokens: 512
     timeout: 30
     max_retries: 3
-    role: "Assistant"
+    role: "Assistant"  # A1: Assistant
+  agent_2:
+    type: "custom_api"
+    model: "gpt-3.5-turbo"
+    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
+    base_url: "https://api2.aigcbest.top/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 30
+    max_retries: 3
+    role: "Dishwasher"  # A2: Dishwasher
+  agent_3:
+    type: "custom_api"
+    model: "gpt-4o"
+    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
+    base_url: "https://api2.aigcbest.top/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 30
+    max_retries: 3
+    role: "Assistant"  # A3: Assistant
+  agent_4:
+    type: "custom_api"
+    model: "gpt-4o"
+    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
+    base_url: "https://api2.aigcbest.top/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 30
+    max_retries: 3
+    role: "Chef"  # A4: Chef
 
 # Evaluation settings
 evaluation:

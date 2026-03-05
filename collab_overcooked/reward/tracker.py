@@ -32,15 +32,16 @@ class ProcessRewardTracker:
         self.enable_collab_reward = bool(self.settings.get("collab_reward_enabled", False))
 
         self.references = self._load_references()
-        self.sequence_histories: List[List[str]] = [[], []]
-        self.sequence_scores: List[float] = [0.0, 0.0]
-        self.collab_sequence_scores: List[float] = [0.0, 0.0]
+        num_players = getattr(mdp, 'num_players', 2)
+        self.sequence_histories: List[List[str]] = [[] for _ in range(num_players)]
+        self.sequence_scores: List[float] = [0.0] * num_players
+        self.collab_sequence_scores: List[float] = [0.0] * num_players
 
         self.recipe_lookup = self._build_recipe_lookup()
         self.intermediate_targets = self._resolve_recipe_targets(self.order)
         self.observed_targets = set()
 
-        self.penalty_queue: List[List[Dict[str, str]]] = [[], []]
+        self.penalty_queue: List[List[Dict[str, str]]] = [[] for _ in range(num_players)]
         self.call_events: List[Dict] = []
         self.step_call_records: Dict[int, List[List[Dict]]] = {}
 
@@ -48,25 +49,25 @@ class ProcessRewardTracker:
     # Public API
     # ------------------------------------------------------------------
     def register_format_error(self, agent_index: int, detail: str):
-        if agent_index is None:
+        if agent_index is None or agent_index >= len(self.penalty_queue):
             return
         self.penalty_queue[agent_index].append({"type": "format", "detail": detail})
 
     def register_validator_error(self, agent_index: int, detail: str):
-        if agent_index is None:
+        if agent_index is None or agent_index >= len(self.penalty_queue):
             return
         self.penalty_queue[agent_index].append({"type": "validator", "detail": detail})
 
     def reset(self):
         """Reset histories when the environment starts a new episode."""
-        self.sequence_histories = [[], []]
-        self.sequence_scores = [0.0, 0.0]
-        self.collab_sequence_scores = [0.0, 0.0]
+        num_players = getattr(self.mdp, 'num_players', 2)
+        self.sequence_histories = [[] for _ in range(num_players)]
+        self.sequence_scores = [0.0] * num_players
+        self.collab_sequence_scores = [0.0] * num_players
+        self.penalty_queue = [[] for _ in range(num_players)]
         self.observed_targets.clear()
         self.call_events.clear()
         self.step_call_records.clear()
-        for queue in self.penalty_queue:
-            queue.clear()
 
     def export_state(self) -> Dict[str, Any]:
         """Serialize tracker progress for snapshot replay."""
@@ -80,22 +81,23 @@ class ProcessRewardTracker:
 
     def import_state(self, data: Optional[Dict[str, Any]]):
         """Restore tracker progress from :meth:`export_state` output."""
+        num_players = getattr(self.mdp, 'num_players', 2)
         if not data:
             self.reset()
             return
         self.sequence_histories = copy.deepcopy(
-            data.get("sequence_histories", [[], []])
+            data.get("sequence_histories", [[] for _ in range(num_players)])
         )
-        if len(self.sequence_histories) < 2:
-            self.sequence_histories = [[], []]
-        self.sequence_scores = list(data.get("sequence_scores", [0.0, 0.0]))
-        if len(self.sequence_scores) < 2:
-            self.sequence_scores = [0.0, 0.0]
+        while len(self.sequence_histories) < num_players:
+            self.sequence_histories.append([])
+        self.sequence_scores = list(data.get("sequence_scores", [0.0] * num_players))
+        while len(self.sequence_scores) < num_players:
+            self.sequence_scores.append(0.0)
         self.collab_sequence_scores = list(
-            data.get("collab_sequence_scores", [0.0, 0.0])
+            data.get("collab_sequence_scores", [0.0] * num_players)
         )
-        if len(self.collab_sequence_scores) < 2:
-            self.collab_sequence_scores = [0.0, 0.0]
+        while len(self.collab_sequence_scores) < num_players:
+            self.collab_sequence_scores.append(0.0)
         observed = data.get("observed_targets", [])
         self.observed_targets = set(observed) if observed else set()
         penalty_state = data.get("penalty_queue")
@@ -155,7 +157,8 @@ class ProcessRewardTracker:
             "total": total,
         }
         self.call_events.append(entry)
-        bucket = self.step_call_records.setdefault(ts, [[], []])
+        num_players = getattr(self.mdp, 'num_players', 2)
+        bucket = self.step_call_records.setdefault(ts, [[] for _ in range(num_players)])
         bucket[agent_index].append(entry)
         return entry
 
@@ -164,13 +167,14 @@ class ProcessRewardTracker:
         Update rewards after a control step. `ml_actions` should contain executed medium-level actions.
         """
         if ml_actions is None:
-            ml_actions = [None, None]
+            ml_actions = [None] * getattr(self.mdp, 'num_players', 2)
 
         per_agent = []
         team_total = 0.0
 
-        bucket = self.step_call_records.pop(timestep, [[], []])
-        for agent_idx in range(2):
+        num_players = getattr(self.mdp, 'num_players', 2)
+        bucket = self.step_call_records.pop(timestep, [[] for _ in range(num_players)])
+        for agent_idx in range(num_players):
             call_entries = bucket[agent_idx]
             seq_reward = sum(entry["sequence_reward"] for entry in call_entries)
             agent_total = sum(entry["total"] for entry in call_entries)
@@ -195,7 +199,7 @@ class ProcessRewardTracker:
         team_total += intermediate_reward
 
         for agent_data in per_agent:
-            agent_data["total"] += intermediate_reward / 2.0
+            agent_data["total"] += intermediate_reward / max(len(per_agent), 1)
 
         reward_info = {
             "timestamp": timestep,
@@ -371,6 +375,8 @@ class ProcessRewardTracker:
     # Penalty helpers
     # ------------------------------------------------------------------
     def _consume_penalties(self, agent_index: int) -> Tuple[float, List[Dict[str, str]]]:
+        if agent_index >= len(self.penalty_queue):
+            return 0.0, []
         events = self.penalty_queue[agent_index]
         total = 0.0
         details = []
