@@ -18,6 +18,17 @@ environment:
   # 盘子管理参数（仅在使用支持W符号的地图时有效）
   max_clean_dishes: 6        # D处盘子数量上限
   wash_time: 5               # W处清洗时间（步数）
+  # 可插拔全局调度器（用于对比实验）
+  global_scheduler:
+    enabled: true
+    mode: "capability_busy"   # capability_busy | off
+    timeout_steps: 8          # 分配后若无进展超过该步数，触发重派
+    clean_dish_threshold: 3   # clean_dish < threshold 且 dirty_dish > 0 时触发洗碗分配
+    verbose: true
+    role_capabilities:
+      chef: ["cook_task"]
+      assistant: ["cook_task"]
+      dishwasher: ["wash_task"]
 
 # Runtime / control loop settings
 run:

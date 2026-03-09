@@ -161,8 +161,13 @@ class LLMAgents(LLMPair):
         turn_statistics_dict_cp = copy.deepcopy(turn_statistics_dict)
         self.turn_statistics_dict = turn_statistics_dict_cp
         # A2A Protocol: 旁路记录层（不影响任何现有逻辑）
-        from collab_overcooked.a2a_protocol import A2AProtocol
+        from collab_overcooked.a2a_protocol import A2AProtocol, InstructionRegistry
         self._a2a_protocol = A2AProtocol(agent_index=agent_index or 0)
+        # A2A: 指令执行状态（接受来自其他 agent 的 REQUEST 后触发）
+        self._a2a_registry = InstructionRegistry()
+        self._a2a_pending_instruction: Optional[str] = None  # 正在执行的 A2A 指令
+        self._a2a_source_agent: Optional[int] = None         # 请求方 agent_index
+        self._a2a_source_task: Optional[int] = None          # 关联 task_id
         # self.generate_layout_prompt()
 
     @staticmethod
@@ -351,9 +356,9 @@ class LLMAgents(LLMPair):
             )
 
         chef_workflow = """- The usual workflow for the chef is:
-	  1. Read the cooking process from your recipe. All of your decisions must be strictly guided by the recipe and should not lead to unfounded behavior.
-	  2. Ask the assistant to pick up ingredients from the ingredient dispenser and use the correct utensil to handle them according to the recipe. Since you do not have access to all the objects, you need to assign some tasks to the assistant while you perform other tasks in parallel.
-	  3. Work in parallel with the assistant to finish the order in the shortest time possible, unless there is nothing you can do in the current situation. If you have nothing to do, you can wait.
+  1. Read the cooking process from your recipe. All of your decisions must be strictly guided by the recipe and should not lead to unfounded behavior.
+  2. Ask the assistant to pick up ingredients from the ingredient dispenser and use the correct utensil to handle them according to the recipe. Since you do not have access to all the objects, you need to assign some tasks to the assistant while you perform other tasks in parallel.
+  3. Work in parallel with the assistant to finish the order in the shortest time possible, unless there is nothing you can do in the current situation. If you have nothing to do, you can wait.
   4. Serve the dish (optional). If the recipe specifies that the dish needs to be served on a plate, you must use `fill_dish_with_food(utensil_name)` to serve the dish from the utensil first; otherwise, just pick up the food from the utensil.
   5. Use `deliver_soup()."""
         assistant_workflow = """The usual workflow for the Assistant is:  
@@ -392,7 +397,7 @@ class LLMAgents(LLMPair):
             if _comm_partner is not None and hasattr(_comm_partner, 'load_recipe'):
                 _comm_partner.load_recipe()
             elif getattr(self, 'teammate', None) and hasattr(self.teammate, 'load_recipe'):
-                self.teammate.load_recipe()
+            self.teammate.load_recipe()
             prompt = prompt.replace("{workflow}", assistant_workflow)
             prompt = prompt.replace(
                 "{job}",
@@ -580,7 +585,7 @@ class LLMAgents(LLMPair):
             tm_utensils = access.get(tm_idx, [])
             layout_prompt += f"A{tm_idx}({tm_name}) workspace: "
             for u in tm_utensils:
-                layout_prompt += u + "  "
+            layout_prompt += u + "  "
             if tm_name == "Assistant":
                 layout_prompt += "dish_dispenser  ingredient_dispenser"
             layout_prompt += "\n"
@@ -635,7 +640,7 @@ class LLMAgents(LLMPair):
                 tm_line += f"a dish with {tm_object}. "
             elif tm_object == "nothing":
                 tm_line += f"{tm_object}. "
-            else:
+        else:
                 tm_line += f"one {tm_object}. "
             teammates_state_prompt += tm_line
 
@@ -911,25 +916,25 @@ class LLMAgents(LLMPair):
         if len(self.mdp._agent_utensil_access) >= num_players:
             # 已经计算过了
             # 兼容旧字段
-            if self.mdp.utensil_list_chef == [] or self.mdp.utensil_list_assist == []:
+        if self.mdp.utensil_list_chef == [] or self.mdp.utensil_list_assist == []:
                 self._fill_legacy_utensil_lists()
             return
 
         for i in range(num_players):
             if i in self.mdp._agent_utensil_access:
                 continue
-            player = state.players[i]
+                player = state.players[i]
             accessible = []
-            for utensil in self.mdp.utensil_list:
-                motion_goals = am.ml_action_manager.go_to_utensil_actions(state, utensil, i)
-                motion_goals = [
-                    mg
-                    for mg in motion_goals
-                    if self.mlam.mp.is_valid_motion_start_goal_pair(
-                        player.pos_and_or, mg
-                    )
-                ]
-                if len(motion_goals) > 0:
+                for utensil in self.mdp.utensil_list:
+                    motion_goals = am.ml_action_manager.go_to_utensil_actions(state, utensil, i)
+                    motion_goals = [
+                        mg
+                        for mg in motion_goals
+                        if self.mlam.mp.is_valid_motion_start_goal_pair(
+                            player.pos_and_or, mg
+                        )
+                    ]
+                    if len(motion_goals) > 0:
                     accessible.append(utensil)
             self.mdp._agent_utensil_access[i] = accessible
 
@@ -1093,10 +1098,15 @@ class LLMAgents(LLMPair):
         self._collab_ack_consumed = False
 
         # ----- P1: 自动认领任务 -----
-        self._try_claim_task()
+        # 全局调度模式下，任务分配由 GlobalScheduler 统一执行，避免与本地顺序认领冲突
+        if not getattr(self, "use_global_scheduler", False):
+            self._try_claim_task()
 
         # ----- P2-b: 工具冲突检测 -----
         self._detect_and_store_conflicts(state)
+
+        # ----- A2A: 处理收到的协议消息（上一 timestep 路由来的） -----
+        _a2a_driven_action = self._process_incoming_a2a(self.current_timestep)
 
         # Update order: 只使用自己认领任务的 order。无任务时置空，避免插手其他任务。
         task_order = self._get_my_task_order()
@@ -1112,13 +1122,20 @@ class LLMAgents(LLMPair):
             self.teammate.order = teammate_task_order if teammate_task_order else ""
 
         # 多任务模式下：Chef/Assistant 无任务时必须空闲等待，不能插手他人任务
+        # 但若 A2A 协议给了指令（来自队友的 REQUEST），优先执行该指令
         if self.task_pool is not None and self.role.lower() in ("chef", "assistant"):
             my_task = self.task_pool.get_agent_current_task(self.agent_index)
             if my_task is None:
-                self.current_ml_action = "wait(1)"
-                self.current_ml_action_steps = 0
-                self.time_to_wait = 1
-                self.pending_collab_reply = False
+                if _a2a_driven_action:
+                    # A2A 驱动：接受了队友的 REQUEST，执行对应动作
+                    self.current_ml_action = _a2a_driven_action
+                    self.current_ml_action_steps = 0
+                    _a2a_driven_action = None  # 已使用，清空
+                else:
+                    self.current_ml_action = "wait(1)"
+                    self.current_ml_action_steps = 0
+                    self.time_to_wait = 1
+                    self.pending_collab_reply = False
         self.change_communication_role("ask", "answer")
         self.planner.dialog_history_list = []
         # Clear dialogue history for all teammates (supporting multiple agents)
@@ -1126,7 +1143,7 @@ class LLMAgents(LLMPair):
             for teammate in self.teammates:
                 teammate.planner.dialog_history_list = []
         elif self.teammate:
-            self.teammate.planner.dialog_history_list = []
+        self.teammate.planner.dialog_history_list = []
         # check if teammates have finished their actions (supporting multiple agents)
         if hasattr(self, 'teammates'):
             for teammate in self.teammates:
@@ -1136,24 +1153,29 @@ class LLMAgents(LLMPair):
                         teammate.current_ml_action = None
         elif self.teammate:
             if self.teammate.current_ml_action_steps > 0 and self.teammate.current_ml_action is not None:
-                current_ml_action_done = self.teammate.check_current_ml_action_done(state)
-                if current_ml_action_done:
-                    self.teammate.current_ml_action = None
+            current_ml_action_done = self.teammate.check_current_ml_action_done(state)
+            if current_ml_action_done:
+                self.teammate.current_ml_action = None
 
         # Record teammate ml_actions for all teammates (supporting multiple agents)
         num_players = len(state.players)
         for other_idx in range(num_players):
             if other_idx != self.agent_index and state.ml_actions[other_idx] is not None:
-                self.teammate_ml_actions.append(
-                    {
-                        "timestamp": self.current_timestep,
+            self.teammate_ml_actions.append(
+                {
+                    "timestamp": self.current_timestep,
                         "action": state.ml_actions[other_idx],
                         "agent_index": other_idx,  # Record which agent performed the action
-                    }
-                )
+                }
+            )
 
         # if current ml action does not exist, generate a new one
+        # A2A: 如果收到来自队友的 REQUEST 且有可执行指令，优先注入，无需 LLM 生成
         if self.current_ml_action is None:
+            if _a2a_driven_action:
+                self.current_ml_action = _a2a_driven_action
+                _a2a_driven_action = None
+            else:
             self.current_ml_action = self.generate_ml_action(state)
 
         # when "wait" and has other action in action_wait_parse ,replace wait as the action
@@ -1164,6 +1186,9 @@ class LLMAgents(LLMPair):
         if self.current_ml_action_steps > 0:
             current_ml_action_done = self.check_current_ml_action_done(state)
             if current_ml_action_done:
+                # A2A: 若该动作是由 A2A REQUEST 驱动的，完成后向请求方发 INFORM
+                if self._a2a_pending_instruction:
+                    self._a2a_send_inform_completion(self.current_timestep)
                 # generate a new ml action
                 self.generate_success_feedback(state)
                 self.current_ml_action = None
@@ -1310,7 +1335,7 @@ class LLMAgents(LLMPair):
                 for p_idx in range(num_players):
                     if p_idx == self.agent_index:
                         action_slots.append(Action.ALL_ACTIONS)
-                    else:
+                else:
                         action_slots.append([Action.STAY])
                 joint_actions = list(itertools.product(*action_slots))
 
@@ -1432,6 +1457,294 @@ class LLMAgents(LLMPair):
         collab_primitives = ("request(", "seek(", "ack(", "deny(")
         return any(lowered.startswith(prefix) for prefix in collab_primitives)
 
+    # ──────────────────────────────────────────────────────────────
+    # A2A Protocol: 主动消息处理与指令执行
+    # ──────────────────────────────────────────────────────────────
+
+    def _collab_action_to_instruction(self, action_str: str) -> Optional[str]:
+        """
+        将 Collab 请求的 action 字符串映射到 InstructionRegistry key（用于协议分类和日志）。
+
+        设计：
+        - pickup(*任意食材*, ingredient_dispenser) → pickup_ingredient（通用，不绑定菜名）
+        - place_obj_on_counter() → place_on_counter
+        - put_obj_in_utensil(*)  → put_in_utensil
+        - cook/cut/bake/stir     → operate_utensil
+        - fill_dish_with_food(*) → fill_dish
+        - deliver_soup()         → deliver_food
+        - wash(*)                → wash_dishes
+        - get_dish(*)            → get_dish
+        - go_to(counter*)        → go_to_counter
+        - go_to(serving*)        → go_to_serving
+        """
+        if not action_str:
+            return None
+        import re
+        s = action_str.lower().strip()
+        # 提取 request(Ax, VERB(...)) 中的 VERB
+        m = re.search(r'request\s*\([^,]+,\s*([a-z_]+)\s*\(', s)
+        verb = m.group(1).strip() if m else s.split("(")[0].strip()
+
+        _MAP = {
+            # ── 取食材（所有菜名归一） ──────────────────────────────
+            "pickup":               "pickup_ingredient",
+            # ── 放柜台 ──────────────────────────────────────────────
+            "place_obj_on_counter": "place_on_counter",
+            # ── 放入设备 ─────────────────────────────────────────────
+            "put_obj_in_utensil":   "put_in_utensil",
+            # ── 烹饪操作 ─────────────────────────────────────────────
+            "cook":                 "operate_utensil",
+            "cut":                  "operate_utensil",
+            "bake":                 "operate_utensil",
+            "stir":                 "operate_utensil",
+            # ── 盛盘 ─────────────────────────────────────────────────
+            "fill_dish_with_food":  "fill_dish",
+            # ── 交付 ─────────────────────────────────────────────────
+            "deliver_soup":         "deliver_food",
+            # ── 洗碗 ─────────────────────────────────────────────────
+            "wash":                 "wash_dishes",
+            # ── 取盘子 ───────────────────────────────────────────────
+            "get_dish":             "get_dish",
+            # ── 导航 ─────────────────────────────────────────────────
+            "go_to":                "go_to_counter",   # 默认；serving 会在下面细化
+        }
+        result = _MAP.get(verb)
+        # 细化 go_to：判断目的地
+        if verb == "go_to":
+            if "serving" in s or "deliver" in s:
+                result = "go_to_serving"
+            else:
+                result = "go_to_counter"
+        # pickup 中若来源是 dish_dispenser → 归为 get_dish
+        if verb == "pickup" and "dish_dispenser" in s:
+            result = "get_dish"
+        return result
+
+    # find_motion_goals 能识别的合法动词集合（同步于 find_motion_goals 的分支）
+    _VALID_ML_ACTION_VERBS = frozenset({
+        "pickup", "put_obj_in_utensil", "place_obj_on_counter",
+        "fill_dish_with_food", "deliver_soup", "cook", "cut",
+        "stir", "bake", "wait", "wash", "get_dish", "add_toast",
+        "go_to",  # 抽象导航格式，由 find_motion_goals 的 go_to 分支处理
+    })
+
+    def _extract_ml_action_from_collab(self, raw_collab: str) -> Optional[str]:
+        """
+        从 Collab 消息文本中提取可直接使用的 ml_action 字符串。
+
+        支持三种格式：
+        1. Collab(request(A1, pickup(carrot, ingredient_dispenser)))
+           → pickup(carrot, ingredient_dispenser)          [直接合法 ml_action]
+        2. Collab(request(A1, place_obj_on_counter()))
+           → place_obj_on_counter()
+        3. go_to(counter(3,1)) / go_to(pot0)               [抽象导航格式，go_to 分支处理]
+
+        适用于所有 30+ 个 reference 菜品，无需硬编码菜名。
+        """
+        import re
+        if not raw_collab:
+            return None
+        s = raw_collab.strip()
+
+        # ── 优先尝试从 request(Ax, ACTION) 结构提取内层动作 ──────────────
+        # 匹配 request(任意, 动词(...))，支持嵌套括号（如 go_to(counter(3,1))）
+        # 先找到 request(..., 的位置，然后使用括号计数提取完整动作
+        request_match = re.search(r'request\s*\([^,]+,\s*', s, re.IGNORECASE)
+        if request_match:
+            start_pos = request_match.end()
+            # 从 start_pos 开始，找到第一个动词
+            verb_match = re.search(r'([a-z_]+)\s*\(', s[start_pos:], re.IGNORECASE)
+            if verb_match:
+                verb_start = start_pos + verb_match.start()
+                verb_name = verb_match.group(1).strip().lower()
+                if verb_name in self._VALID_ML_ACTION_VERBS:
+                    # 找到动词后的第一个 '('，然后使用括号计数找到匹配的 ')'
+                    paren_start = start_pos + verb_match.end() - 1  # '(' 的位置
+                    paren_count = 0
+                    i = paren_start
+                    while i < len(s):
+                        if s[i] == '(':
+                            paren_count += 1
+                        elif s[i] == ')':
+                            paren_count -= 1
+                            if paren_count == 0:
+                                # 找到匹配的 ')'
+                                candidate = s[verb_start:i+1].strip()
+                                return candidate
+                        i += 1
+                    # 如果没找到匹配的 ')'，尝试简单提取
+                    simple_match = re.search(r'request\s*\([^,]+,\s*([a-z_]+\s*\([^)]*\))', s, re.IGNORECASE)
+                    if simple_match:
+                        candidate = simple_match.group(1).strip()
+                        if candidate.split("(")[0].strip().lower() in self._VALID_ML_ACTION_VERBS:
+                            return candidate
+
+        # ── 若整体就是一个合法 ml_action（去掉 Collab(...) 包装）──────────
+        # 去掉 Collab( ... ) 外壳后再尝试
+        m2 = re.match(r'collab\s*\(\s*(.*)\s*\)\s*$', s, re.IGNORECASE | re.DOTALL)
+        inner = m2.group(1).strip() if m2 else s
+        verb2 = inner.split("(")[0].strip().lower()
+        if verb2 in self._VALID_ML_ACTION_VERBS:
+            return inner
+
+        # ── 语义回退：保留 go_to 格式（由 find_motion_goals 处理）─────────
+        if s.lower().startswith("go_to("):
+            return s
+
+        # ── 最终回退：用指令 key → 标准 ml_action 表 ─────────────────────
+        _FALLBACK: Dict[str, str] = {
+            "place_on_counter":  "place_obj_on_counter()",
+            "pickup_ingredient": "pickup(ingredient, ingredient_dispenser)",
+            "get_dish":          "get_dish(dish_dispenser)",
+            "deliver_food":      "deliver_soup()",
+            "wash_dishes":       "wash(water0)",
+        }
+        key = self._collab_action_to_instruction(raw_collab)
+        if key and key in _FALLBACK:
+            return _FALLBACK[key]
+
+        return None
+
+    def _process_incoming_a2a(self, timestep: int) -> Optional[str]:
+        """
+        处理 incoming A2A 消息队列（每次 action() 开始时调用）。
+        - REQUEST 且能解析出合法 ml_action → 自动 ACCEPT + 返回该 ml_action
+        - REQUEST 但无法解析              → REJECT
+        - ACCEPT / INFORM / REJECT        → 打印协议事件，更新状态
+        返回 None 表示无 A2A 驱动的动作。
+        """
+        try:
+            from collab_overcooked.a2a_protocol.message import (
+                MessageType, create_accept_message,
+                create_reject_message,
+            )
+            from collab_overcooked.a2a_protocol.protocol import ProtocolState
+
+            pending = self._a2a_protocol.process_incoming()
+            for msg in pending:
+                if msg.type == MessageType.REQUEST:
+                    raw_action = msg.content.get("action", "")
+                    # 动态解析：适用所有菜品，无需硬编码
+                    ml_action = self._extract_ml_action_from_collab(raw_action)
+                    # 同时用旧 key 做记录（方便日志和 INFORM 追踪）
+                    key = self._collab_action_to_instruction(raw_action) or raw_action[:30]
+                    if ml_action:
+                        # 发送 ACCEPT
+                        accept = create_accept_message(
+                            self.agent_index, msg.from_, msg,
+                            {"instruction": key, "ml_action": ml_action},
+                        )
+                        accept.metadata["timestamp"] = timestep
+                        self._a2a_protocol.agent_index = self.agent_index
+                        self._a2a_protocol.send_message(accept)
+                        # 记录执行状态
+                        self._a2a_pending_instruction = key
+                        self._a2a_source_agent = msg.from_
+                        self._a2a_source_task = msg.task_id
+                        print(
+                            f"[A2A] t={timestep} A{self.agent_index} ← REQUEST(A{msg.from_}) "
+                            f"action='{self._truncate_message_for_log(raw_action, 200)}' → ACCEPT "
+                            f"instruction='{key}' ml_action='{ml_action}'"
+                        )
+                        return ml_action
+                    else:
+                        # 无法执行：发送 REJECT
+                        reject = create_reject_message(
+                            self.agent_index, msg.from_, msg,
+                            reason=f"cannot parse ml_action from: {raw_action[:40]}",
+                        )
+                        reject.metadata["timestamp"] = timestep
+                        self._a2a_protocol.send_message(reject)
+                        print(
+                            f"[A2A] t={timestep} A{self.agent_index} ← REQUEST(A{msg.from_}) "
+                            f"action='{self._truncate_message_for_log(raw_action, 200)}' → REJECT (parse failed)"
+                        )
+
+                elif msg.type == MessageType.ACCEPT:
+                    content = msg.content or {}
+                    print(
+                        f"[A2A] t={timestep} A{self.agent_index} ← ACCEPT(A{msg.from_}) "
+                        f"instruction='{content.get('instruction', '')}'"
+                    )
+                    conv_id = self._a2a_protocol._get_conversation_id(msg)
+                    self._a2a_protocol.active_conversations[conv_id] = ProtocolState.EXECUTING
+
+                elif msg.type == MessageType.INFORM:
+                    content = msg.content or {}
+                    print(
+                        f"[A2A] t={timestep} A{self.agent_index} ← INFORM(A{msg.from_}) "
+                        f"action='{content.get('action', '')}' "
+                        f"status='{content.get('status', '')}'"
+                    )
+
+                elif msg.type == MessageType.REJECT:
+                    content = msg.content or {}
+                    print(
+                        f"[A2A] t={timestep} A{self.agent_index} ← REJECT(A{msg.from_}) "
+                        f"reason='{content.get('reason', '')}'"
+                    )
+        except Exception:
+            pass  # 协议层不能影响主流程
+        return None
+
+    def _a2a_send_inform_completion(self, timestep: int):
+        """
+        当 A2A 驱动的动作完成后，向请求方发送 INFORM(completed) 消息。
+        """
+        if not self._a2a_pending_instruction or self._a2a_source_agent is None:
+            return
+        try:
+            from collab_overcooked.a2a_protocol.message import create_inform_message
+            inform = create_inform_message(
+                from_agent=self.agent_index,
+                to_agent=self._a2a_source_agent,
+                action=self._a2a_pending_instruction,
+                status="completed",
+                details={"instruction": self._a2a_pending_instruction},
+                task_id=self._a2a_source_task,
+            )
+            inform.metadata["timestamp"] = timestep
+            self._a2a_protocol.agent_index = self.agent_index
+            self._a2a_protocol.send_message(inform)
+            print(
+                f"[A2A] t={timestep} A{self.agent_index} → INFORM(A{self._a2a_source_agent}) "
+                f"instruction='{self._a2a_pending_instruction}' status=COMPLETED"
+            )
+        except Exception:
+            pass
+        finally:
+            self._a2a_pending_instruction = None
+            self._a2a_source_agent = None
+            self._a2a_source_task = None
+
+    # ──────────────────────────────────────────────────────────────
+    # A2A Protocol: 旁路记录层（将 Collab(...) 翻译为 A2A 消息存档）
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _truncate_message_for_log(text: str, max_len: int = 200) -> str:
+        """
+        智能截断消息文本用于日志输出。
+        
+        Args:
+            text: 原始消息文本
+            max_len: 最大长度（默认 200）
+            
+        Returns:
+            截断后的文本，如果被截断则添加 "..."
+        """
+        if not text:
+            return ""
+        text = text.replace("\n", " ").replace("\r", " ")
+        if len(text) <= max_len:
+            return text
+        # 尝试在单词边界截断
+        truncated = text[:max_len]
+        last_space = truncated.rfind(" ")
+        if last_space > max_len * 0.7:  # 如果最后一个空格在 70% 位置之后
+            truncated = truncated[:last_space]
+        return truncated + "..."
+
     def _record_a2a_from_collab(
         self,
         talk_text: Optional[str],
@@ -1502,6 +1815,12 @@ class LLMAgents(LLMPair):
             # Keep protocol identity synchronized with runtime-assigned agent index.
             self._a2a_protocol.agent_index = self.agent_index
             self._a2a_protocol.send_message(msg)
+            # 可见日志：每条 Collab 消息都打印 A2A 类型和摘要
+            short = self._truncate_message_for_log(talk_text, 200)
+            print(
+                f"[A2A] t={timestep} A{self.agent_index} → {msg.type.value}"
+                f"(A{to_idx}) task={task_id} msg='{short}'"
+            )
         except Exception:
             pass  # 记录层任何异常都不影响主流程
 
@@ -2080,9 +2399,9 @@ class LLMAgents(LLMPair):
                     detail,
                 )
             utensils = self.mdp.interact_actions.get(self.parse_action, [])
-            if params[0] in utensils:
+                    if params[0] in utensils:
                 ml_action = f"{self.parse_action}({params[0]})"
-            else:
+                    else:
                 detail = f"Wrong {self.parse_action}() parmas:{params[0]}"
                 self._report_action_format_error(detail, action_string)
                 return False, detail
@@ -2683,13 +3002,13 @@ class LLMAgents(LLMPair):
             if match:
                 cleaned = self._sanitize_action_text(match.group(1))
                 if cleaned:
-                    return f"Action: {cleaned}"
+                return f"Action: {cleaned}"
             plan_pattern = rf"{role}\s+plan\s*:?\s*(.*)"
             plan_match = re.search(plan_pattern, text, re.IGNORECASE | re.DOTALL)
             if plan_match:
                 plan_body = self._sanitize_action_text(plan_match.group(1))
                 if plan_body:
-                    return f"Action: {plan_body}"
+                return f"Action: {plan_body}"
             if need_correct:
                 response, _ = self.important_part_no_create(1, "action", response)
             else:
@@ -2962,21 +3281,21 @@ class LLMAgents(LLMPair):
                 else:
                     self._relabel_last_llm_call("communication")
                     planner_call_index = None
-                    self.planner.add_msg_to_dialog_history(
-                        {"role": "talk", "content": communicate_response}
-                    )
-                    self.append_conversation_line(self.name, communicate_response)
-                    # statistic
-                    self.turn_statistics_dict["statistical_data"]["communication"][
-                        self.agent_index
-                    ]["turn"].append(communicate_response)
-                    self.turn_statistics_dict["statistical_data"]["communication"][
-                        self.agent_index
-                    ]["token"].append(tokens_num)
-                    self.turn_statistics_dict["statistical_data"]["communication"][
-                        self.agent_index
-                    ]["call"] += 1
-                    response = self.communication(communicate_response, state)
+                self.planner.add_msg_to_dialog_history(
+                    {"role": "talk", "content": communicate_response}
+                )
+                self.append_conversation_line(self.name, communicate_response)
+                # statistic
+                self.turn_statistics_dict["statistical_data"]["communication"][
+                    self.agent_index
+                ]["turn"].append(communicate_response)
+                self.turn_statistics_dict["statistical_data"]["communication"][
+                    self.agent_index
+                ]["token"].append(tokens_num)
+                self.turn_statistics_dict["statistical_data"]["communication"][
+                    self.agent_index
+                ]["call"] += 1
+                response = self.communication(communicate_response, state)
             elif ("[NOTHING]" not in action_text_block) and (action_text_block != ""):
                 ml_action = self.parse_ml_action_top(action_text_block, True)
             else:
@@ -3008,7 +3327,7 @@ class LLMAgents(LLMPair):
             if _partner is not None:
                 _partner.planner.dialog_history_list_storage = (
                     _partner.planner.dialog_history_list
-                )
+            )
         self.del_dialog_history()
         if ml_action == "":
             ml_action = self.parse_ml_action_top(response, True)
@@ -3025,7 +3344,7 @@ class LLMAgents(LLMPair):
         )
         override = getattr(self, "_forced_action_override", None)
         reward_call_index = planner_call_index
-        reward_action = ml_action or self._preview_primary_action(action_text_block)
+            reward_action = ml_action or self._preview_primary_action(action_text_block)
         if override and isinstance(override, dict):
             forced_idx = override.get("call_index")
             if forced_idx is not None:
@@ -3511,6 +3830,54 @@ class LLMAgents(LLMPair):
             motion_goals = ml_manager.go_to_utensil_actions(
                 state, self.parse_action_params[0], self.agent_index
             )
+        elif self.parse_action == "go_to":
+            # 人类可读的抽象导航格式：go_to(counter(...)) / go_to(utensil) / go_to(serving_location)
+            # 允许 A2A 协议和 InstructionRegistry 使用自然描述格式
+            # 注意：parse_params_in_action 可能无法正确处理嵌套括号（如 counter(3,1)），
+            # 所以我们需要从原始 action 字符串中提取完整参数
+            param = ""
+            if self.parse_action_params:
+                # 如果参数被错误分割（如 ['counter(3', '1']），尝试合并
+                param = ",".join(self.parse_action_params).strip()
+            else:
+                # 如果参数为空，尝试从原始 action 字符串中提取
+                import re
+                m = re.search(r'go_to\s*\(\s*([^)]+)\s*\)', self.current_ml_action, re.IGNORECASE)
+                if m:
+                    param = m.group(1).strip()
+            
+            # 参数匹配（支持部分匹配，即使解析不完美也能工作）
+            if "counter" in param.lower() or param == "":
+                # go_to(counter(...)) → 找可放置物品的柜台位置（与 place_obj_on_counter 等价）
+                motion_goals = self.find_shared_counters(state, self.mlam)
+                if not motion_goals:
+                    motion_goals = ml_manager.place_obj_on_counter_actions(state)
+            elif "serving" in param.lower() or "deliver" in param.lower():
+                # go_to(serving_location) → 前往交付点
+                motion_goals = ml_manager.deliver_soup_actions()
+            elif "dish_dispenser" in param.lower():
+                motion_goals = ml_manager.pickup_obj_actions(
+                    state, "dish", "dish_dispenser", self.agent_index, counter_objects
+                )
+            elif "ingredient_dispenser" in param.lower():
+                motion_goals = ml_manager.pickup_obj_actions(
+                    state, None, "ingredient_dispenser", self.agent_index, counter_objects
+                )
+            elif param:
+                # go_to(pot0) / go_to(oven0) / go_to(water0) 等 → 导航到目标设备
+                # 提取设备名称（去除可能的括号和坐标）
+                device_name = param.split("(")[0].strip() if "(" in param else param.strip()
+                motion_goals = ml_manager.go_to_utensil_actions(
+                    state, device_name, self.agent_index
+                )
+            else:
+                motion_goals = ml_manager.wait_actions(player)
+        elif self.parse_action == "get_dish":
+            # get_dish(dish_dispenser) — 取盘子
+            src = self.parse_action_params[0] if self.parse_action_params else "dish_dispenser"
+            motion_goals = ml_manager.pickup_obj_actions(
+                state, "dish", src, self.agent_index, counter_objects
+            )
         else:
             raise ValueError("Invalid action: {}".format(self.current_ml_action))
 
@@ -3534,8 +3901,8 @@ class LLMAgents(LLMPair):
             except Exception as e:
                 # Fallback to static check if dynamic planning fails
                 is_valid = self.mlam.mp.is_valid_motion_start_goal_pair(
-                    player.pos_and_or, mg
-                )
+                player.pos_and_or, mg
+            )
             
             if is_valid:
                 valid_motion_goals.append(mg)
@@ -3634,7 +4001,7 @@ class LLMAgents(LLMPair):
         # This allows A1 and A3 to simultaneously stand at (3,1) or (3,2) to access I(2,1) and C(2,2)
         num_players = len(state.players_pos_and_or)
         if num_players <= 2:
-            other_pos_and_or = state.players_pos_and_or[1 - self.agent_index]
+        other_pos_and_or = state.players_pos_and_or[1 - self.agent_index]
         else:
             # For multi-agent, just use the first other agent for find_path
             # (find_path will handle that one agent, but we don't block others since agents don't collide)

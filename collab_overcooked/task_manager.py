@@ -126,6 +126,10 @@ class TaskPool:
             return False
         if agent_index in task["claimed_by"]:
             return True  # 已经认领过
+        # 一个 agent 同一时刻只能认领一个活跃任务
+        current = self.get_agent_current_task(agent_index)
+        if current is not None and current["id"] != task_id and current["status"] in ("pending", "claimed", "in_progress"):
+            return False
 
         # 检查该角色是否已被占用
         role_lower = role.lower()

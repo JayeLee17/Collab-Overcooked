@@ -57,6 +57,7 @@ from overcooked_ai_py.agents.agent import AgentGroup
 from overcooked_ai_py.mdp.actions import Action
 from .reward import ProcessRewardTracker
 from .task_manager import TaskPool
+from .global_scheduler import build_scheduler_from_config
 
 # Import from new modular system
 try:
@@ -195,6 +196,8 @@ def convert_yaml_to_variant(config):
         # 盘子管理参数（传递给 MDP）
         'max_clean_dishes': env_config.get('max_clean_dishes'),
         'wash_time': env_config.get('wash_time'),
+        # 全局调度器配置（可插拔）
+        'global_scheduler': env_config.get('global_scheduler', {}),
     }
     
     return variant
@@ -283,6 +286,13 @@ def main(variant=None, config_path=None):
     task_pool = TaskPool(orders_list, num_concurrent_tasks=num_concurrent_tasks, max_total_tasks=max_total_tasks)
     print(f"\n[TaskPool] 初始化 {len(orders_list)} 个任务 (并发={num_concurrent_tasks}, max_total={max_total_tasks}): {orders_list}")
     print(task_pool.summary())
+    # --- 可插拔 GlobalScheduler ---
+    scheduler_cfg = variant.get('global_scheduler', {})
+    global_scheduler = build_scheduler_from_config(scheduler_cfg)
+    if getattr(global_scheduler, "enabled", False):
+        print(f"[GlobalScheduler] enabled mode={scheduler_cfg.get('mode', 'capability_busy')} timeout={scheduler_cfg.get('timeout_steps', 8)}")
+    else:
+        print("[GlobalScheduler] disabled (fallback to local task claim)")
     
     p0_algo = variant.get('p0', 'LLMPair')
     p1_algo = variant.get('p1', 'LLMPair')
@@ -375,6 +385,8 @@ def main(variant=None, config_path=None):
                 agent.task_pool = task_pool
                 agent_config = agent_configs.get(f'agent_{idx}', {})
                 agent.role = agent_config.get('role', 'Chef')
+                # 全局调度开启时，关闭 agent 内部顺序认领，统一由 GlobalScheduler 分配
+                agent.use_global_scheduler = bool(getattr(global_scheduler, "enabled", False))
                 print(f"  A{idx}({agent.role}): task_pool 已注入")
         else:
             # Use old system
@@ -422,35 +434,46 @@ def main(variant=None, config_path=None):
 
         
         if mode == 'exp':
-            # 第一个时间步：扫描并分配任务，直到所有 Assistant 和 Chef 都有任务
+            # 第一个时间步：初始化分配
             print("\n" + "="*60)
             print("[初始任务分配] 开始扫描并分配任务...")
             print("="*60)
-            
+
             s_t = env.state
-            max_rounds = 10  # 最多扫描 10 轮，避免无限循环
-            for round_num in range(max_rounds):
-                # 让所有 agent 尝试认领任务
-                for agent_idx, agent in enumerate(team.agents):
-                    if hasattr(agent, '_try_claim_task'):
-                        agent._try_claim_task()
-                
-                # 检查是否所有 Assistant 和 Chef 都有任务
-                all_assigned = True
-                for agent_idx, agent in enumerate(team.agents):
-                    role = getattr(agent, 'role', '').lower()
-                    if role in ('assistant', 'chef'):
-                        task = task_pool.get_agent_current_task(agent_idx)
-                        if task is None:
-                            all_assigned = False
-                            break
-                
-                if all_assigned:
-                    print(f"[初始任务分配] 所有 Assistant 和 Chef 都已分配任务（第 {round_num + 1} 轮）")
-                    break
-                
-                if round_num < max_rounds - 1:
-                    print(f"[初始任务分配] 第 {round_num + 1} 轮：仍有未分配任务的 Agent，继续扫描...")
+            if getattr(global_scheduler, "enabled", False):
+                # 全局调度模式：由调度器统一分配
+                sys_msgs = global_scheduler.step(
+                    timestep=0,
+                    state=s_t,
+                    mdp=mdp,
+                    task_pool=task_pool,
+                    agents=team.agents,
+                )
+                for _msg in sys_msgs:
+                    if isinstance(_msg.to, int):
+                        for _recv in team.agents:
+                            if _recv.agent_index == _msg.to and hasattr(_recv, "_a2a_protocol"):
+                                _recv._a2a_protocol.receive_message(_msg)
+            else:
+                # 兼容旧模式：本地顺序认领
+                max_rounds = 10  # 最多扫描 10 轮，避免无限循环
+                for round_num in range(max_rounds):
+                    for agent_idx, agent in enumerate(team.agents):
+                        if hasattr(agent, '_try_claim_task'):
+                            agent._try_claim_task()
+                    all_assigned = True
+                    for agent_idx, agent in enumerate(team.agents):
+                        role = getattr(agent, 'role', '').lower()
+                        if role in ('assistant', 'chef'):
+                            task = task_pool.get_agent_current_task(agent_idx)
+                            if task is None:
+                                all_assigned = False
+                                break
+                    if all_assigned:
+                        print(f"[初始任务分配] 所有 Assistant 和 Chef 都已分配任务（第 {round_num + 1} 轮）")
+                        break
+                    if round_num < max_rounds - 1:
+                        print(f"[初始任务分配] 第 {round_num + 1} 轮：仍有未分配任务的 Agent，继续扫描...")
             
             # 输出当前各个智能体的任务状态
             print("\n" + "="*60)
@@ -475,7 +498,44 @@ def main(variant=None, config_path=None):
                 print(map)
                 # P1: 每 timestep 打印 TaskPool 状态
                 print(task_pool.summary())
-                a_t, ingredient_for_pickup = team.joint_action(s_t) 
+                # GlobalScheduler tick: 全局观察 -> DAG-lite ready slots -> 分配/重派 -> 系统A2A消息
+                if getattr(global_scheduler, "enabled", False):
+                    sys_msgs = global_scheduler.step(
+                        timestep=t,
+                        state=s_t,
+                        mdp=mdp,
+                        task_pool=task_pool,
+                        agents=team.agents,
+                    )
+                    if sys_msgs:
+                        print(f"[GlobalScheduler] t={t} emit {len(sys_msgs)} system messages")
+                    for _msg in sys_msgs:
+                        if isinstance(_msg.to, int):
+                            for _recv in team.agents:
+                                if _recv.agent_index == _msg.to and hasattr(_recv, "_a2a_protocol"):
+                                    _recv._a2a_protocol.receive_message(_msg)
+                a_t, ingredient_for_pickup = team.joint_action(s_t)
+
+                # ── A2A 消息路由 ──────────────────────────────────────────
+                # joint_action() 期间各 agent 的 _record_a2a_from_collab 会将
+                # 消息放入 outgoing_queue；在这里统一投递给目标 agent，
+                # 使其在下一 timestep 的 _process_incoming_a2a 中处理。
+                for _sender in team.agents:
+                    if not hasattr(_sender, '_a2a_protocol'):
+                        continue
+                    _outgoing = _sender._a2a_protocol.get_outgoing_messages()
+                    for _msg in _outgoing:
+                        _to = _msg.to
+                        if isinstance(_to, int) and _to >= 0:
+                            for _recv in team.agents:
+                                if _recv.agent_index == _to and hasattr(_recv, '_a2a_protocol'):
+                                    _recv._a2a_protocol.receive_message(_msg)
+                        elif _to == "broadcast":
+                            for _recv in team.agents:
+                                if _recv.agent_index != _sender.agent_index and hasattr(_recv, '_a2a_protocol'):
+                                    _recv._a2a_protocol.receive_message(_msg)
+                # ─────────────────────────────────────────────────────────
+
                 print(a_t)
                 dialogue_t = team.reset_dialogue()
                 print(f"\n-----------Controller-----------\n")    
@@ -568,6 +628,8 @@ def main(variant=None, config_path=None):
                 statistics_dict['content'].append(turn_statistics_dict_both)
                 # P2-c: 保存 TaskPool 状态到统计中
                 statistics_dict['task_pool'] = task_pool.to_dict()
+                statistics_dict['global_scheduler'] = global_scheduler.to_dict()
+                statistics_dict['scheduler_reference'] = global_scheduler.to_dict().get('scheduler_reference', [])
                 # A2A Protocol: 保存各 agent 的 A2A 消息日志（旁路记录，不影响实验逻辑）
                 statistics_dict['a2a_protocol_log'] = [
                     agent._a2a_protocol.to_dict()
