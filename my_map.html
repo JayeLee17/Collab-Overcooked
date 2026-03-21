@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Map: multi_agent_map</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 20px; font-family: sans-serif; background: #f5f0e6; }
+    h1 { margin-bottom: 12px; color: #333; }
+    .map-container { display: inline-block; padding: 8px; background: #4a3728; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    .map-grid { display: grid; gap: 2px; border: 2px solid #3d2e22; border-radius: 4px; overflow: hidden; }
+    .cell { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; color: #333; }
+    .cell-wall { background: #5c4033; }
+    .cell-floor { background: #e8dcc4; }
+    .cell-pot { background: #8b7355; color: #fff; }
+    .cell-oven { background: #6b4423; color: #f4d03f; }
+    .cell-chopping { background: #7d5a3c; color: #fff; }
+    .cell-blender { background: #6b4423; color: #ddd; }
+    .cell-water { background: #4a6fa5; color: #fff; }
+    .cell-dish { background: #8b7355; color: #fff; }
+    .cell-serving { background: #3d2e22; color: #f4d03f; font-size: 24px; }
+    .cell-ingredient { background: #7d5a3c; color: #c0392b; }
+    .cell-agent { background: #e8dcc4; position: relative; }
+    .agent-marker { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; color: #333; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
+    .agent-0 { background: #85c1e9; }
+    .agent-1 { background: #f5b7b1; }
+    .agent-2 { background: #a9dfbf; }
+    .agent-3 { background: #f9e79f; }
+    .agent-4 { background: #aed6e0; }
+    .legend { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; color: #555; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend-box { width: 20px; height: 20px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Map: multi_agent_map</h1>
+  <div class="map-container">
+    <div id="map" class="map-grid"></div>
+  </div>
+  <div class="legend" id="legend"></div>
+
+  <script>
+    const DATA = {"grid": [[{"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "pot", "symbol": "P", "class": "cell-pot"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}], [{"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "ingredient", "symbol": "I", "class": "cell-ingredient"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}], [{"type": "water", "symbol": "W", "class": "cell-water"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "chopping_board", "symbol": "C", "class": "cell-chopping"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}], [{"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "dish_dispenser", "symbol": "D", "class": "cell-dish"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "floor", "symbol": " ", "class": "cell-floor"}, {"type": "oven", "symbol": "O", "class": "cell-oven"}], [{"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "blender", "symbol": "B", "class": "cell-blender"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "serving", "symbol": "\u2605", "class": "cell-serving"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}, {"type": "wall", "symbol": "X", "class": "cell-wall"}]], "agents": [{"id": 3, "x": 1, "y": 1}, {"id": 4, "x": 4, "y": 1}, {"id": 1, "x": 7, "y": 1}, {"id": 2, "x": 4, "y": 2}, {"id": 5, "x": 6, "y": 3}], "height": 5, "width": 9};
+
+    function render() {
+      const { grid, agents } = DATA;
+      const mapEl = document.getElementById('map');
+      const legendEl = document.getElementById('legend');
+      mapEl.style.gridTemplateColumns = `repeat(${grid[0].length}, 48px)`;
+      mapEl.style.gridTemplateRows = `repeat(${grid.length}, 48px)`;
+      mapEl.innerHTML = '';
+
+      const agentAt = {};
+      agents.forEach(a => {
+        const key = a.y + ',' + a.x;
+        if (!agentAt[key]) agentAt[key] = [];
+        agentAt[key].push(a);
+      });
+
+      for (let y = 0; y < grid.length; y++) {
+        for (let x = 0; x < grid[y].length; x++) {
+          const cell = grid[y][x];
+          const key = y + ',' + x;
+          const as = agentAt[key] || [];
+          const div = document.createElement('div');
+          div.className = 'cell ' + cell.class + (as.length ? ' cell-agent' : '');
+          if (as.length > 0) {
+            const a = as[0];
+            const m = document.createElement('div');
+            m.className = 'agent-marker agent-' + (a.id % 5);
+            m.textContent = 'A' + a.id;
+            div.appendChild(m);
+          } else {
+            div.textContent = cell.symbol || '';
+          }
+          mapEl.appendChild(div);
+        }
+      }
+
+      const items = [
+        ['cell-floor', '可行走'],
+        ['cell-wall', '墙'],
+        ['cell-pot', '锅 P'],
+        ['cell-oven', '烤箱 O'],
+        ['cell-chopping', '砧板 C'],
+        ['cell-blender', '搅拌机 B'],
+        ['cell-water', '水池 W'],
+        ['cell-dish', '盘子 D'],
+        ['cell-serving', '出菜 ★'],
+        ['cell-ingredient', '食材 I'],
+      ];
+      legendEl.innerHTML = items.map(([cls, label]) =>
+        '<span><span class="legend-box ' + cls + '"></span>' + label + '</span>'
+      ).join('');
+    }
+
+    render();
+  </script>
+</body>
+</html>

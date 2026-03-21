@@ -1,0 +1,124 @@
+environment:
+  horizon: 90
+  orders:
+  - boiled_potato_slices
+  - baked_mushroom_soup
+  - sliced_bell_pepper_and_corn_stew
+  layout: multi_agent_map
+  max_steps: 90
+  num_concurrent_tasks: 3
+  max_total_tasks: 3
+  max_clean_dishes: 6
+  wash_time: 5
+  global_scheduler:
+    enabled: true
+    mode: llm
+    timeout_steps: 5
+    clean_dish_threshold: 3
+    verbose: true
+    role_capabilities:
+      chef:
+      - cook_task
+      assistant:
+      - cook_task
+      dishwasher:
+      - wash_task
+    model: qwen3.5-plus
+    temperature: 0.0
+    max_tokens: 512
+    fallback_to_rule: true
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+run:
+  episode: 1
+  mode: exp
+  test_mode: fix_task
+  p0: LLMPair
+  p1: LLMPair
+  collab_mode: llm
+  llm_model: qwen3.5-plus
+  history_window: 3
+  run_id: E6_llm_T90
+agents:
+  num_agents: 5
+  agent_0:
+    type: custom_api
+    model: qwen3.5-plus
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Chef
+  agent_1:
+    type: custom_api
+    model: qwen3.5-plus
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Assistant
+  agent_2:
+    type: custom_api
+    model: qwen3.5-plus
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Dishwasher
+  agent_3:
+    type: custom_api
+    model: qwen3.5-plus
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Assistant
+  agent_4:
+    type: custom_api
+    model: qwen3.5-plus
+    api_key: sk-0dfb7f07d81e4f8a8912a74488e3ebc2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Chef
+evaluation:
+  metrics:
+  - f1_score
+  - similarity
+  - redundancy
+  - collaboration_initiate
+  - collaboration_respond
+  output_dir: ./results
+  save_trajectories: true
+logging:
+  level: INFO
+  save_logs: true
+  log_dir: ./logs
+paths:
+  prompts_dir: ./collab_overcooked/prompts
+  layouts_dir: ./dependencies/overcooked_ai/overcooked_ai_py/data/layouts
+  results_dir: ./results
+_experiment:
+  id: E6
+  mode: llm
+  T: 90
+  num_tasks: 3
+  difficulty:
+  - 2
+  - 3
+  - 4
+  orders:
+  - boiled_potato_slices
+  - baked_mushroom_soup
+  - sliced_bell_pepper_and_corn_stew
+  purpose: mid-high multi-task comparison

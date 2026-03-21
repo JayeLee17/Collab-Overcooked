@@ -105,7 +105,7 @@ class Node:
     def __eq__(self, other):
         return self.position == other.position
     
-def find_path(start_pos_and_or, other_pos_and_or, goal, terrain_mtx, block_other_agent=True):  
+def find_path(start_pos_and_or, other_pos_and_or, goal, terrain_mtx, block_other_agent=False):  
     """
     Find path from start to goal using BFS.
     

@@ -397,7 +397,7 @@ class LLMAgents(LLMPair):
             if _comm_partner is not None and hasattr(_comm_partner, 'load_recipe'):
                 _comm_partner.load_recipe()
             elif getattr(self, 'teammate', None) and hasattr(self.teammate, 'load_recipe'):
-            self.teammate.load_recipe()
+                self.teammate.load_recipe()
             prompt = prompt.replace("{workflow}", assistant_workflow)
             prompt = prompt.replace(
                 "{job}",
@@ -585,7 +585,7 @@ class LLMAgents(LLMPair):
             tm_utensils = access.get(tm_idx, [])
             layout_prompt += f"A{tm_idx}({tm_name}) workspace: "
             for u in tm_utensils:
-            layout_prompt += u + "  "
+                layout_prompt += u + "  "
             if tm_name == "Assistant":
                 layout_prompt += "dish_dispenser  ingredient_dispenser"
             layout_prompt += "\n"
@@ -640,7 +640,7 @@ class LLMAgents(LLMPair):
                 tm_line += f"a dish with {tm_object}. "
             elif tm_object == "nothing":
                 tm_line += f"{tm_object}. "
-        else:
+            else:
                 tm_line += f"one {tm_object}. "
             teammates_state_prompt += tm_line
 
@@ -860,6 +860,64 @@ class LLMAgents(LLMPair):
                     f"Clean dishes: {clean_dishes}/{max_dishes}\n"
                 )
 
+        # --- Dish requirement rule (recipe-driven, no second-guessing) ---
+        # User rule: If the recipe text does NOT mention dish/plate/fill_dish_with_food,
+        # then treat it as NOT requiring a plate. Do not overthink.
+        dish_rule_prompt = ""
+        try:
+            cur_orders = []
+            if hasattr(state, "current_k_order") and state.current_k_order:
+                cur_orders = [o for o in state.current_k_order if isinstance(o, str) and o.strip()]
+            if self.task_pool is not None:
+                for t in getattr(self.task_pool, "tasks", []) or []:
+                    if t.get("status") != "completed":
+                        o = t.get("order") or t.get("name")
+                        if isinstance(o, str) and o.strip():
+                            cur_orders.append(o.strip())
+            seen = set()
+            cur_orders = [o for o in cur_orders if not (o in seen or seen.add(o))]
+
+            def _recipe_text_for(order_name: str) -> str:
+                # Prefer loaded recipe cache; otherwise load from file (same matching rule as load_recipe)
+                if order_name in getattr(self, "recipe", {}) and self.recipe.get(order_name):
+                    return str(self.recipe.get(order_name) or "")
+                try:
+                    recipe_name_list = os.listdir(PROMPT_DIR + "/recipe/")
+                    for r in recipe_name_list:
+                        r_name = r[2:-4]
+                        if order_name == r_name:
+                            with open(PROMPT_DIR + "/recipe/" + r, "r", encoding="utf-8") as fh:
+                                return fh.read()
+                except Exception:
+                    return ""
+                return ""
+
+            def _recipe_mentions_dish(txt: str) -> bool:
+                s = (txt or "").lower()
+                return ("dish" in s) or ("plate" in s) or ("fill_dish_with_food" in s)
+
+            if cur_orders:
+                parts = []
+                for o in cur_orders:
+                    recipe_txt = _recipe_text_for(o)
+                    need_plate = _recipe_mentions_dish(recipe_txt)
+                    if need_plate:
+                        parts.append(
+                            f"{o}: recipe_mentions_dish=YES → MUST plate (pickup(dish, dish_dispenser/counter) then fill_dish_with_food(...), then deliver_soup())"
+                        )
+                    else:
+                        parts.append(
+                            f"{o}: recipe_mentions_dish=NO → NO plate (pickup(final_food, utensil) then deliver_soup())"
+                        )
+                dish_rule_prompt = (
+                    "[DishRule] Use ONLY recipe text. If recipe does NOT mention dish/plate/fill_dish_with_food, "
+                    "then do NOT use a dish. Do NOT second-guess. "
+                    + " | ".join(parts)
+                    + "\n"
+                )
+        except Exception:
+            dish_rule_prompt = ""
+
         # P2-b: 工具冲突提示
         conflict_prompt = self._build_conflict_prompt() if hasattr(self, '_build_conflict_prompt') else ""
 
@@ -868,6 +926,8 @@ class LLMAgents(LLMPair):
         scene_components = [f"Scene {state.timestep}:"]
         if task_pool_prompt:
             scene_components.append(task_pool_prompt.strip())
+        if dish_rule_prompt:
+            scene_components.append(dish_rule_prompt.strip())
         if conflict_prompt:
             scene_components.append(conflict_prompt.strip())
         if layout_section:
@@ -916,25 +976,25 @@ class LLMAgents(LLMPair):
         if len(self.mdp._agent_utensil_access) >= num_players:
             # 已经计算过了
             # 兼容旧字段
-        if self.mdp.utensil_list_chef == [] or self.mdp.utensil_list_assist == []:
+            if self.mdp.utensil_list_chef == [] or self.mdp.utensil_list_assist == []:
                 self._fill_legacy_utensil_lists()
             return
 
         for i in range(num_players):
             if i in self.mdp._agent_utensil_access:
                 continue
-                player = state.players[i]
+            player = state.players[i]
             accessible = []
-                for utensil in self.mdp.utensil_list:
-                    motion_goals = am.ml_action_manager.go_to_utensil_actions(state, utensil, i)
-                    motion_goals = [
-                        mg
-                        for mg in motion_goals
-                        if self.mlam.mp.is_valid_motion_start_goal_pair(
-                            player.pos_and_or, mg
-                        )
-                    ]
-                    if len(motion_goals) > 0:
+            for utensil in self.mdp.utensil_list:
+                motion_goals = am.ml_action_manager.go_to_utensil_actions(state, utensil, i)
+                motion_goals = [
+                    mg
+                    for mg in motion_goals
+                    if self.mlam.mp.is_valid_motion_start_goal_pair(
+                        player.pos_and_or, mg
+                    )
+                ]
+                if len(motion_goals) > 0:
                     accessible.append(utensil)
             self.mdp._agent_utensil_access[i] = accessible
 
@@ -1143,7 +1203,7 @@ class LLMAgents(LLMPair):
             for teammate in self.teammates:
                 teammate.planner.dialog_history_list = []
         elif self.teammate:
-        self.teammate.planner.dialog_history_list = []
+            self.teammate.planner.dialog_history_list = []
         # check if teammates have finished their actions (supporting multiple agents)
         if hasattr(self, 'teammates'):
             for teammate in self.teammates:
@@ -1153,21 +1213,21 @@ class LLMAgents(LLMPair):
                         teammate.current_ml_action = None
         elif self.teammate:
             if self.teammate.current_ml_action_steps > 0 and self.teammate.current_ml_action is not None:
-            current_ml_action_done = self.teammate.check_current_ml_action_done(state)
-            if current_ml_action_done:
-                self.teammate.current_ml_action = None
+                current_ml_action_done = self.teammate.check_current_ml_action_done(state)
+                if current_ml_action_done:
+                    self.teammate.current_ml_action = None
 
         # Record teammate ml_actions for all teammates (supporting multiple agents)
         num_players = len(state.players)
         for other_idx in range(num_players):
             if other_idx != self.agent_index and state.ml_actions[other_idx] is not None:
-            self.teammate_ml_actions.append(
-                {
-                    "timestamp": self.current_timestep,
+                self.teammate_ml_actions.append(
+                    {
+                        "timestamp": self.current_timestep,
                         "action": state.ml_actions[other_idx],
                         "agent_index": other_idx,  # Record which agent performed the action
-                }
-            )
+                    }
+                )
 
         # if current ml action does not exist, generate a new one
         # A2A: 如果收到来自队友的 REQUEST 且有可执行指令，优先注入，无需 LLM 生成
@@ -1176,7 +1236,7 @@ class LLMAgents(LLMPair):
                 self.current_ml_action = _a2a_driven_action
                 _a2a_driven_action = None
             else:
-            self.current_ml_action = self.generate_ml_action(state)
+                self.current_ml_action = self.generate_ml_action(state)
 
         # when "wait" and has other action in action_wait_parse ,replace wait as the action
         if "wait" in self.current_ml_action and not self.action_wait_parse.empty():
@@ -2399,9 +2459,9 @@ class LLMAgents(LLMPair):
                     detail,
                 )
             utensils = self.mdp.interact_actions.get(self.parse_action, [])
-                    if params[0] in utensils:
+            if params[0] in utensils:
                 ml_action = f"{self.parse_action}({params[0]})"
-                    else:
+            else:
                 detail = f"Wrong {self.parse_action}() parmas:{params[0]}"
                 self._report_action_format_error(detail, action_string)
                 return False, detail
@@ -2682,6 +2742,34 @@ class LLMAgents(LLMPair):
         return action_block
 
     def important_part_no_create(self, retry_num, part_type, response):
+        def _ensure_error_slots_for_agent() -> None:
+            """
+            Guard against partially initialized statistics arrays.
+            Timeout/retry paths can run with stale templates in some runs.
+            """
+            sd = self.turn_statistics_dict.setdefault("statistical_data", {})
+            error_list = sd.setdefault("error", [])
+            error_corr_list = sd.setdefault("error_correction", [])
+
+            while len(error_list) <= self.agent_index:
+                error_list.append(
+                    {
+                        "format_error": {"error_num": 0, "error_message": []},
+                        "validator_error": {"error_num": 0, "error_message": []},
+                    }
+                )
+            while len(error_corr_list) <= self.agent_index:
+                error_corr_list.append(
+                    {
+                        "format_correction": {"correction_num": 0, "correction_tokens": []},
+                        "validator_correction": {
+                            "correction_num": 0,
+                            "reflection_obtain": [],
+                            "correction_tokens": [],
+                        },
+                    }
+                )
+
         part_display = {
             "think": "Think",
             "action": "Action",
@@ -2720,6 +2808,7 @@ class LLMAgents(LLMPair):
                 {"missing_part": part_type},
             )
             # statistic
+            _ensure_error_slots_for_agent()
             self.turn_statistics_dict["statistical_data"]["error"][self.agent_index][
                 "format_error"
             ]["error_num"] += 1
@@ -3002,13 +3091,13 @@ class LLMAgents(LLMPair):
             if match:
                 cleaned = self._sanitize_action_text(match.group(1))
                 if cleaned:
-                return f"Action: {cleaned}"
+                    return f"Action: {cleaned}"
             plan_pattern = rf"{role}\s+plan\s*:?\s*(.*)"
             plan_match = re.search(plan_pattern, text, re.IGNORECASE | re.DOTALL)
             if plan_match:
                 plan_body = self._sanitize_action_text(plan_match.group(1))
                 if plan_body:
-                return f"Action: {plan_body}"
+                    return f"Action: {plan_body}"
             if need_correct:
                 response, _ = self.important_part_no_create(1, "action", response)
             else:
@@ -3344,7 +3433,7 @@ class LLMAgents(LLMPair):
         )
         override = getattr(self, "_forced_action_override", None)
         reward_call_index = planner_call_index
-            reward_action = ml_action or self._preview_primary_action(action_text_block)
+        reward_action = ml_action or self._preview_primary_action(action_text_block)
         if override and isinstance(override, dict):
             forced_idx = override.get("call_index")
             if forced_idx is not None:
@@ -4001,7 +4090,7 @@ class LLMAgents(LLMPair):
         # This allows A1 and A3 to simultaneously stand at (3,1) or (3,2) to access I(2,1) and C(2,2)
         num_players = len(state.players_pos_and_or)
         if num_players <= 2:
-        other_pos_and_or = state.players_pos_and_or[1 - self.agent_index]
+            other_pos_and_or = state.players_pos_and_or[1 - self.agent_index]
         else:
             # For multi-agent, just use the first other agent for find_path
             # (find_path will handle that one agent, but we don't block others since agents don't collide)

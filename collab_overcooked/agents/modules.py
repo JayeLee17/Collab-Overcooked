@@ -246,7 +246,15 @@ class Module:
                 
             except Exception as e:
                 retry_count += 1
+                exc_type = type(e).__name__
                 rprint(f"[red][LLM ERROR][/red]: {e}")
+                # 诊断信息：便于区分超时/连接/限流等，以及当前 timeout 与重试次数
+                diag = (
+                    f"[LLM DIAG] type={exc_type} timeout_sec={getattr(self, 'timeout', None)} "
+                    f"retry={retry_count}/{max_retries} model={getattr(self, 'model', '')} "
+                    f"base_url={getattr(self, 'base_url', '') or '(default)'}"
+                )
+                rprint(f"[yellow]{diag}[/yellow]")
                 if retry_count >= max_retries:
                     rprint("[red][ERROR][/red]: Query failed after maximum retries!")
                     return "", 0

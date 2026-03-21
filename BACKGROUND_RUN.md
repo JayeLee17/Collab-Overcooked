@@ -212,12 +212,71 @@ chmod +x run_background.sh
 ./run_background.sh
 ```
 
+## LLM 报错诊断（如 Request timed out）
+
+实验跑到半程出现 `[LLM ERROR]: Request timed out.` 时，日志中会紧跟一行 **`[LLM DIAG]`**，用于定位原因。
+
+### 如何查看
+
+```bash
+# 在日志中搜索所有 LLM 错误及诊断
+grep -A1 "\[LLM ERROR\]" output1-1.log
+
+# 或只看诊断行
+grep "\[LLM DIAG\]" output1-1.log
+```
+
+### 诊断行含义
+
+`[LLM DIAG]` 格式示例：
+
+```
+[LLM DIAG] type=APITimeoutError timeout_sec=30 retry=1/3 model=qwen3.5-flash base_url=https://dashscope.aliyuncs.com/compatible-mode/v1
+```
+
+| 字段 | 含义 | 可采取的措施 |
+|------|------|----------------|
+| **type** | 异常类型 | `APITimeoutError` → 服务端在 timeout_sec 内未返回，可增大 timeout；`ConnectionError` → 网络/代理/URL 问题；`APIError`/`RateLimitError` → 限流或 4xx/5xx |
+| **timeout_sec** | 当前请求超时时间（秒） | 在 `configs/default.yaml` 里把对应 agent 的 `timeout` 调大（如 60、120） |
+| **retry** | 第几次重试（如 1/3） | 若经常在 1/3 就失败，说明单次请求就超时，优先增大 timeout 或减少并发 |
+| **model** / **base_url** | 使用的模型和接口地址 | 确认该 endpoint 可用、未限流；多 agent 时可看出是哪个在报错 |
+
+### 常见原因与处理
+
+1. **半程才超时**：多 agent 并发 + 对话变长，单次请求耗时超过当前 `timeout`（如 30s）。  
+   → 在 `default.yaml` 的 `agents.agent_*.timeout` 改为 60 或 120，必要时把 `max_retries` 先改为 1 减少重复请求。
+2. **网络/连接不稳定**：`type=ConnectionError` 或 `Connection reset`。  
+   → 检查网络、VPN、`base_url` 是否正确。
+3. **服务端限流**：`type=RateLimitError` 或 429。  
+   → 降低并发（如先减少 `num_agents`）或换时段/配额。
+
+---
+
 ## 注意事项
 
 1. **磁盘空间**：确保有足够的磁盘空间保存日志文件
 2. **内存**：5个玩家的 planner 计算可能需要较多内存
 3. **时间**：首次计算可能需要10-15分钟，请耐心等待
 4. **检查完成**：计算完成后，缓存文件会保存在 `dependencies/overcooked_ai/overcooked_ai_py/data/planners/multi_agent_map_am.pkl`
+
+## 地图前端展示（与设计图一致风格）
+
+用项目里的 layout 文件生成一张可单独打开的 HTML 地图图，方便查看可行走区域、设施和 agent 出生点（风格：米色路径、深棕墙/设施、出菜星、图例）。
+
+```bash
+# 默认使用 multi_agent_map.layout，生成 map_viewer.html 并尝试打开浏览器
+python scripts/map_viewer_generator.py
+
+# 指定 layout 与输出路径
+python scripts/map_viewer_generator.py -l dependencies/overcooked_ai/overcooked_ai_py/data/layouts/multi_agent_map.layout -o my_map.html
+
+# 只生成不打开浏览器
+python scripts/map_viewer_generator.py --no-open
+```
+
+生成后直接用浏览器打开 `map_viewer.html` 即可。
+
+---
 
 ## 快速命令总结
 

@@ -10,7 +10,7 @@ environment:
   # 方式2: orders 列表（每个任务做不同的菜，会轮转补充）
   orders:
     - "boiled_egg"
-    - "baked_carrot_soup"
+    - "baked_sweet_potato"
   layout: "multi_agent_map"  # Available: cramped_room, multi_agent_map, coordination_ring, etc.
   max_steps: 400
   num_concurrent_tasks: 2    # 同时保持的活跃任务数量
@@ -21,14 +21,25 @@ environment:
   # 可插拔全局调度器（用于对比实验）
   global_scheduler:
     enabled: true
-    mode: "capability_busy"   # capability_busy | off
-    timeout_steps: 8          # 分配后若无进展超过该步数，触发重派
+    # mode 可选值:
+    #   capability_busy  — 基于角色能力+空闲状态的规则调度器（原始版本）
+    #   llm              — LLM驱动的全局调度器（新增，失败时自动回退规则调度）
+    #   off              — 关闭全局调度，保留智能体本地认领逻辑
+    mode: "capability_busy"
+    timeout_steps: 5          # 分配后若无进展超过该步数，触发重派
     clean_dish_threshold: 3   # clean_dish < threshold 且 dirty_dish > 0 时触发洗碗分配
     verbose: true
     role_capabilities:
       chef: ["cook_task"]
       assistant: ["cook_task"]
       dishwasher: ["wash_task"]
+    # --- LLM 调度器专用参数（mode: llm 时生效）---
+    model: "qwen3.5-plus"          # 默认模型（兼容 OpenAI 接口的任何模型均可）
+    temperature: 0.0
+    max_tokens: 512
+    fallback_to_rule: true      # LLM失败时自动回退到规则调度器
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"                 # 留空则从环境变量 LLM_API_KEY 读取
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # Qwen示例
 
 # Runtime / control loop settings
 run:
@@ -38,7 +49,7 @@ run:
   p0: "LLMPair"
   p1: "LLMPair"
   collab_mode: "llm"
-  llm_model: "gpt-3.5-turbo"
+  llm_model: "qwen3.5-plus"
   history_window: 3
   
 # Agent settings
@@ -46,52 +57,52 @@ agents:
   num_agents: 5  # 匹配 multi_agent_map 地图的5个玩家位置
   agent_0:
     type: "custom_api"  # openai, vllm, custom_api
-    model: "gpt-4o"
-    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
-    base_url: "https://api2.aigcbest.top/v1"  # Optional for OpenAI, required for custom_api
+    model: "qwen3.5-plus"
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"  # Required for OpenAI/custom API
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # Optional for OpenAI, required for custom_api
     temperature: 0.1
     max_tokens: 512
-    timeout: 30
+    timeout: 120
     max_retries: 3
     role: "Chef"  # A0: Chef
   agent_1:
     type: "custom_api"
-    model: "gpt-4o"
-    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
-    base_url: "https://api2.aigcbest.top/v1"
+    model: "qwen3.5-plus"
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"  # Required for OpenAI/custom API
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     temperature: 0.1
     max_tokens: 512
-    timeout: 30
+    timeout: 120
     max_retries: 3
     role: "Assistant"  # A1: Assistant
   agent_2:
     type: "custom_api"
-    model: "gpt-3.5-turbo"
-    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
-    base_url: "https://api2.aigcbest.top/v1"
+    model: "qwen3.5-plus"
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"  # Required for OpenAI/custom API
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     temperature: 0.1
     max_tokens: 512
-    timeout: 30
+    timeout: 120
     max_retries: 3
     role: "Dishwasher"  # A2: Dishwasher
   agent_3:
     type: "custom_api"
-    model: "gpt-4o"
-    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
-    base_url: "https://api2.aigcbest.top/v1"
+    model: "qwen3.5-plus"
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"  # Required for OpenAI/custom API
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     temperature: 0.1
     max_tokens: 512
-    timeout: 30
+    timeout: 120
     max_retries: 3
     role: "Assistant"  # A3: Assistant
   agent_4:
     type: "custom_api"
-    model: "gpt-4o"
-    api_key: "sk-ncjH2QRKjo78piTA48Ofm9aU7sCAoNLKLxhUiHQ5vT3tMo51"  # Required for OpenAI/custom API
-    base_url: "https://api2.aigcbest.top/v1"
+    model: "qwen3.5-plus"
+    api_key: "sk-0dfb7f07d81e4f8a8912a74488e3ebc2"  # Required for OpenAI/custom API
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     temperature: 0.1
     max_tokens: 512
-    timeout: 30
+    timeout: 120
     max_retries: 3
     role: "Chef"  # A4: Chef
 

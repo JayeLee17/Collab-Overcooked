@@ -34,6 +34,7 @@ class TaskPool:
             "total_completed": 0,
             "total_wash_done": 0,
             "task_durations": [],  # (task_id, order, duration)
+            "blocked_count": 0,   # 任务因无进展被判定为阻塞/超时释放的累计次数
         }
 
     def _add_task_internal(self, order: str) -> Dict[str, Any]:
@@ -166,6 +167,10 @@ class TaskPool:
         """释放 Agent 的当前任务（任务完成后调用）"""
         # Agent 的 claimed_task 状态由 get_agent_current_task 自动管理
         pass
+
+    def record_blocked(self, count: int = 1):
+        """记录一次任务阻塞/超时释放事件，用于 system_score 计算"""
+        self.stats["blocked_count"] += count
 
     def replenish_tasks(self) -> List[Dict[str, Any]]:
         """补充任务，使活跃任务数量回到 num_concurrent_tasks

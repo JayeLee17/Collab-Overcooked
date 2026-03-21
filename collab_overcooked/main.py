@@ -203,6 +203,93 @@ def convert_yaml_to_variant(config):
     return variant
 
 
+# ---------------------------------------------------------------------------
+# Scoring helpers (low-intrusion, no reference needed)
+# ---------------------------------------------------------------------------
+
+# Weights for system_score = env_score + PROGRESS_WEIGHT * progress_score - BLOCKED_PENALTY * blocked_count
+_PROGRESS_WEIGHT: float = 5.0
+_BLOCKED_PENALTY: float = 2.0
+
+
+def _compute_progress_score(task_pool, state, mdp) -> float:
+    """Estimate progress for all *non-completed* tasks using a generic four-stage rule.
+
+    Stages (per task):
+        0.0 – pending (no agent assigned)
+        0.25 – claimed / in_progress (agents assigned, no advanced objects detected)
+        0.5  – semi-finished object found on map or held by assigned agent
+        0.75 – finished / with_dish object found on map or held by assigned agent
+        1.0  – task already completed (excluded from sum to avoid double-counting env_score)
+
+    We only sum over tasks that are NOT yet completed.
+    """
+    if state is None:
+        return 0.0
+
+    # Gather all objects currently in the environment (on ground + held by players)
+    all_objects = list(state.objects.values()) if hasattr(state, "objects") else []
+    for player in (state.players if hasattr(state, "players") else []):
+        if player.held_object is not None:
+            all_objects.append(player.held_object)
+
+    # Build a fast per-category set for global checks
+    categories_present = {obj.catagory for obj in all_objects}
+
+    # Build per-agent held-object lookup: agent_index -> catagory or None
+    agent_held: dict = {}
+    if hasattr(state, "players"):
+        for idx, player in enumerate(state.players):
+            agent_held[idx] = player.held_object.catagory if player.held_object is not None else None
+
+    total = 0.0
+    for task in task_pool.tasks:
+        status = task.get("status", "pending")
+        if status == "completed":
+            # Exclude completed tasks to avoid double-counting env_score
+            continue
+
+        if status == "pending" and not task.get("claimed_by"):
+            total += 0.0
+            continue
+
+        # Task has at least one agent assigned → at minimum stage 1
+        assigned_agents = task.get("claimed_by", [])
+
+        # Check the most-advanced catagory held by agents on this task
+        best_held = None
+        for ag_idx in assigned_agents:
+            cat = agent_held.get(ag_idx)
+            if cat is None:
+                continue
+            _rank = {"ingredient": 1, "dish": 1, "semi-finished": 2, "finished": 3, "with_dish": 3}
+            if best_held is None or _rank.get(cat, 0) > _rank.get(best_held, 0):
+                best_held = cat
+
+        # Also consider global env objects (best available, not tied to specific task)
+        _global_best = None
+        for cat in ("with_dish", "finished", "semi-finished"):
+            if cat in categories_present:
+                _global_best = cat
+                break
+
+        # Merge: prefer per-agent over global heuristic if more advanced
+        _rank = {"ingredient": 1, "dish": 1, "semi-finished": 2, "finished": 3, "with_dish": 3}
+        effective = best_held if best_held else _global_best
+
+        if effective in ("finished", "with_dish"):
+            stage = 0.75
+        elif effective == "semi-finished":
+            stage = 0.5
+        else:
+            # ingredient held, or no helpful object detected → stage 1
+            stage = 0.25
+
+        total += stage
+
+    return total
+
+
 def main(variant=None, config_path=None):
     """
     Main function supporting both old variant dict and new YAML config
@@ -509,6 +596,16 @@ def main(variant=None, config_path=None):
                     )
                     if sys_msgs:
                         print(f"[GlobalScheduler] t={t} emit {len(sys_msgs)} system messages")
+                    # Count cancel_assignment (timeout/no-progress) events → update blocked_count
+                    _step_logs = getattr(global_scheduler, "step_logs", [])
+                    if _step_logs:
+                        _latest_events = _step_logs[-1].get("events", [])
+                        _blocked_this_step = sum(
+                            1 for _ev in _latest_events
+                            if isinstance(_ev, dict) and _ev.get("action") == "cancel_assignment"
+                        )
+                        if _blocked_this_step:
+                            task_pool.record_blocked(_blocked_this_step)
                     for _msg in sys_msgs:
                         if isinstance(_msg.to, int):
                             for _recv in team.agents:
@@ -630,6 +727,20 @@ def main(variant=None, config_path=None):
                 statistics_dict['task_pool'] = task_pool.to_dict()
                 statistics_dict['global_scheduler'] = global_scheduler.to_dict()
                 statistics_dict['scheduler_reference'] = global_scheduler.to_dict().get('scheduler_reference', [])
+                # ── Composite scoring ──────────────────────────────────────
+                _env_score = r_total
+                _progress_score = _compute_progress_score(task_pool, env.state, mdp)
+                _blocked_count = task_pool.stats.get("blocked_count", 0)
+                _system_score = (
+                    _env_score
+                    + _PROGRESS_WEIGHT * _progress_score
+                    - _BLOCKED_PENALTY * _blocked_count
+                )
+                statistics_dict['env_score'] = _env_score
+                statistics_dict['progress_score'] = round(_progress_score, 4)
+                statistics_dict['blocked_count'] = _blocked_count
+                statistics_dict['system_score'] = round(_system_score, 4)
+                # ────────────────────────────────────────────────────────
                 # A2A Protocol: 保存各 agent 的 A2A 消息日志（旁路记录，不影响实验逻辑）
                 statistics_dict['a2a_protocol_log'] = [
                     agent._a2a_protocol.to_dict()
