@@ -1,0 +1,27 @@
+{
+  "base_config": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/exp/E8_llm_T100.yaml",
+  "results_root": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/results/a2a_case_study",
+  "orders": [
+    "boiled_egg",
+    "baked_potato_slices",
+    "sliced_bell_pepper_and_corn_stew"
+  ],
+  "generated": [
+    {
+      "case": "case_map_a_llm_a2a",
+      "config_path": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/case_study/generated/case_map_a_llm_a2a.yaml"
+    },
+    {
+      "case": "case_map_b_llm_a2a",
+      "config_path": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/case_study/generated/case_map_b_llm_a2a.yaml"
+    },
+    {
+      "case": "case_map_b_llm_no_a2a",
+      "config_path": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/case_study/generated/case_map_b_llm_no_a2a.yaml"
+    },
+    {
+      "case": "case_map_b_off_no_a2a",
+      "config_path": "/Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/case_study/generated/case_map_b_off_no_a2a.yaml"
+    }
+  ]
+}

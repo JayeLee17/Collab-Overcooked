@@ -1,0 +1,94 @@
+{
+  "agent_id": "agent_4",
+  "name": "agent_4_cut_pot_chef",
+  "display_name": "Agent 4",
+  "role": "Chef",
+  "layout_name": "heterogeneous_map_a",
+  "capabilities": [
+    "cut_task",
+    "cook_task",
+    "counter_transfer",
+    "finish_hot_food"
+  ],
+  "forbidden_capabilities": [
+    "grill_task",
+    "steam_task",
+    "wash_task",
+    "blend_task",
+    "mix_task"
+  ],
+  "can_handle_tasks": [
+    "use_chopping_board",
+    "use_pot",
+    "cook_food",
+    "handoff_support"
+  ],
+  "can_receive_requests": [
+    "use_chopping_board",
+    "use_pot",
+    "pick_finished_food",
+    "place_on_counter"
+  ],
+  "reachable_tools": [
+    "chopping_board",
+    "pot",
+    "counter"
+  ],
+  "unreachable_tools": [
+    "grill",
+    "steamer",
+    "prep_table",
+    "blender",
+    "mixer",
+    "water"
+  ],
+  "reachable_zones": [
+    "pot_lane",
+    "cut_to_cook_bridge",
+    "shared_counter"
+  ],
+  "counter_access": true,
+  "preferred_stages": [
+    "cut",
+    "cook",
+    "handoff"
+  ],
+  "avoid_stages": [
+    "wash",
+    "blend",
+    "mix"
+  ],
+  "priority_bias": {
+    "pot_job": 1.0,
+    "cut_job": 0.8,
+    "handoff_job": 0.7
+  },
+  "a2a_enabled": true,
+  "accepted_message_types": [
+    "REQUEST",
+    "INFORM",
+    "PROPOSE",
+    "ACK"
+  ],
+  "supported_instructions": [
+    "use_chopping_board",
+    "use_pot",
+    "pick_finished_food",
+    "place_on_counter",
+    "ack_request"
+  ],
+  "default_request_targets": [
+    "agent_2",
+    "agent_3",
+    "agent_1"
+  ],
+  "prompt_summary": "This agent is a chef-side cooker with access to chopping board and pot. It is suitable for cut-to-cook transitions and pot-based completion, but it cannot access grill, steamer, washing, or blend/mix stations.",
+  "extra": {
+    "reachable_tool_symbols": [
+      "C",
+      "P"
+    ],
+    "map_group": "CP",
+    "notes": "Paired capability pattern shared with agent 5."
+  }
+}

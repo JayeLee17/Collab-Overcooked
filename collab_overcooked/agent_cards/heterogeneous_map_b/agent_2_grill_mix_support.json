@@ -1,0 +1,98 @@
+{
+  "agent_id": "agent_2",
+  "name": "agent_2_grill_mix_support",
+  "display_name": "Agent 2",
+  "role": "Assistant",
+  "layout_name": "heterogeneous_map_b",
+  "capabilities": [
+    "grill_task",
+    "mix_task",
+    "counter_transfer",
+    "hot_food_support"
+  ],
+  "forbidden_capabilities": [
+    "pot_task",
+    "oven_task",
+    "blend_task",
+    "cut_task",
+    "wash_task",
+    "steamer_task",
+    "prep_task"
+  ],
+  "can_handle_tasks": [
+    "use_grill",
+    "use_mixer",
+    "stage_baked_items",
+    "handoff_support"
+  ],
+  "can_receive_requests": [
+    "use_grill",
+    "use_mixer",
+    "pick_finished_food",
+    "place_on_counter"
+  ],
+  "reachable_tools": [
+    "grill",
+    "mixer",
+    "counter"
+  ],
+  "unreachable_tools": [
+    "pot",
+    "oven",
+    "blender",
+    "chopping_board",
+    "steamer",
+    "water",
+    "prep_table"
+  ],
+  "reachable_zones": [
+    "grill_lane",
+    "mix_lane",
+    "shared_counter"
+  ],
+  "counter_access": true,
+  "preferred_stages": [
+    "bake",
+    "mix",
+    "handoff"
+  ],
+  "avoid_stages": [
+    "cook",
+    "cut",
+    "wash",
+    "blend"
+  ],
+  "priority_bias": {
+    "grill_job": 1.0,
+    "mix_job": 0.9,
+    "handoff_job": 0.7
+  },
+  "a2a_enabled": true,
+  "accepted_message_types": [
+    "REQUEST",
+    "INFORM",
+    "PROPOSE",
+    "ACK"
+  ],
+  "supported_instructions": [
+    "use_grill",
+    "use_mixer",
+    "pick_finished_food",
+    "place_on_counter",
+    "ack_request"
+  ],
+  "default_request_targets": [
+    "agent_3",
+    "agent_4",
+    "agent_5"
+  ],
+  "prompt_summary": "This agent is a grill-and-mixer support runner. It can operate the grill and mixer, help with hot-food relay, and use shared counters, but it cannot access pot, oven, blender, chopping-board, prep-table, sink, or steamer tools.",
+  "extra": {
+    "reachable_tool_symbols": [
+      "G",
+      "M"
+    ],
+    "map_group": "GM",
+    "notes": "Tool accessibility provided by map design and user specification."
+  }
+}

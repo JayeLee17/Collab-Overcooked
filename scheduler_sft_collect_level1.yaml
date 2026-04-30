@@ -1,0 +1,114 @@
+# Scheduler SFT data collection template
+# The runner script will overwrite `environment.orders` with a selected task group.
+
+environment:
+  horizon: 700
+  orders:
+    - "baked_bell_pepper"
+    - "baked_sweet_potato"
+  layout: "multi_agent_map"
+  max_steps: 700
+  num_concurrent_tasks: 2
+  max_total_tasks: 36
+  max_clean_dishes: 6
+  wash_time: 5
+  global_scheduler:
+    enabled: true
+    mode: "llm"
+    timeout_steps: 12
+    clean_dish_threshold: 6
+    verbose: false
+    role_capabilities:
+      chef: ["cook_task"]
+      assistant: ["cook_task"]
+      dishwasher: ["wash_task"]
+    model: "qwen3.5-plus"
+    temperature: 0.0
+    max_tokens: 512
+    fallback_to_rule: true
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+run:
+  episode: 1
+  mode: "exp"
+  test_mode: "fix_task"
+  p0: "LLMPair"
+  p1: "LLMPair"
+  collab_mode: "llm"
+  llm_model: "qwen3.5-plus"
+  history_window: 3
+  results_root: "results/scheduler_sft_collection/raw_runs"
+
+agents:
+  num_agents: 5
+  agent_0:
+    type: "custom_api"
+    model: "qwen3.5-plus"
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: "Chef"
+  agent_1:
+    type: "custom_api"
+    model: "qwen3.5-plus"
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: "Assistant"
+  agent_2:
+    type: "custom_api"
+    model: "qwen3.5-plus"
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: "Dishwasher"
+  agent_3:
+    type: "custom_api"
+    model: "qwen3.5-plus"
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: "Assistant"
+  agent_4:
+    type: "custom_api"
+    model: "qwen3.5-plus"
+    api_key: "sk-4c13baded8ba4102be13a24f339b5a74"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: "Chef"
+
+evaluation:
+  metrics:
+    - "f1_score"
+    - "similarity"
+    - "redundancy"
+    - "collaboration_initiate"
+    - "collaboration_respond"
+  output_dir: "./results"
+  save_trajectories: true
+
+logging:
+  level: "INFO"
+  save_logs: true
+  log_dir: "./logs"
+
+paths:
+  prompts_dir: "./collab_overcooked/prompts"
+  layouts_dir: "./dependencies/overcooked_ai/overcooked_ai_py/data/layouts"
+  results_dir: "./results"

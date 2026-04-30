@@ -1,0 +1,102 @@
+{
+  "agent_id": "agent_3",
+  "name": "agent_3_oven_blender_pot_chef",
+  "display_name": "Agent 3",
+  "role": "Chef",
+  "layout_name": "heterogeneous_map_b",
+  "capabilities": [
+    "cook_task",
+    "bake_task",
+    "blend_task",
+    "counter_transfer",
+    "finish_hot_food"
+  ],
+  "forbidden_capabilities": [
+    "cut_task",
+    "mix_task",
+    "wash_task",
+    "prep_task",
+    "steamer_task"
+  ],
+  "can_handle_tasks": [
+    "use_pot",
+    "use_oven",
+    "use_blender",
+    "finish_hot_food",
+    "handoff_support"
+  ],
+  "can_receive_requests": [
+    "use_pot",
+    "use_oven",
+    "use_blender",
+    "pick_finished_food",
+    "place_on_counter"
+  ],
+  "reachable_tools": [
+    "oven",
+    "blender",
+    "pot",
+    "counter"
+  ],
+  "unreachable_tools": [
+    "grill",
+    "mixer",
+    "chopping_board",
+    "steamer",
+    "water",
+    "prep_table"
+  ],
+  "reachable_zones": [
+    "hotline_core",
+    "oven_pot_bridge",
+    "shared_counter"
+  ],
+  "counter_access": true,
+  "preferred_stages": [
+    "cook",
+    "bake",
+    "blend",
+    "handoff"
+  ],
+  "avoid_stages": [
+    "cut",
+    "mix",
+    "wash",
+    "prep"
+  ],
+  "priority_bias": {
+    "pot_job": 1.0,
+    "oven_job": 1.0,
+    "blender_job": 0.9
+  },
+  "a2a_enabled": true,
+  "accepted_message_types": [
+    "REQUEST",
+    "INFORM",
+    "PROPOSE",
+    "ACK"
+  ],
+  "supported_instructions": [
+    "use_pot",
+    "use_oven",
+    "use_blender",
+    "pick_finished_food",
+    "place_on_counter",
+    "ack_request"
+  ],
+  "default_request_targets": [
+    "agent_1",
+    "agent_2",
+    "agent_6"
+  ],
+  "prompt_summary": "This agent is a core chef in heterogeneous_map_b. It can access oven, blender, and pot tools for major hot-food stages, but it cannot use grill, mixer, chopping-board, sink, prep-table, or steamer tools.",
+  "extra": {
+    "reachable_tool_symbols": [
+      "O",
+      "B",
+      "P"
+    ],
+    "map_group": "OBP",
+    "notes": "Paired capability pattern shared with agents 4 and 5."
+  }
+}

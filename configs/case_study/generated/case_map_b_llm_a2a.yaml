@@ -1,0 +1,333 @@
+environment:
+  horizon: 120
+  orders:
+  - boiled_egg
+  - baked_potato_slices
+  - sliced_bell_pepper_and_corn_stew
+  layout: heterogeneous_map_b
+  max_steps: 120
+  num_concurrent_tasks: 3
+  max_total_tasks: 3
+  max_clean_dishes: 6
+  wash_time: 5
+  global_scheduler:
+    enabled: true
+    mode: llm
+    timeout_steps: 15
+    clean_dish_threshold: 6
+    verbose: true
+    role_capabilities:
+      chef:
+      - cook_task
+      assistant:
+      - cook_task
+      dishwasher:
+      - wash_task
+    model: qwen3.5-plus
+    temperature: 0.0
+    max_tokens: 512
+    fallback_to_rule: true
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+run:
+  episode: 1
+  mode: exp
+  test_mode: fix_task
+  p0: LLMPair
+  p1: LLMPair
+  collab_mode: llm
+  llm_model: qwen3.5-plus
+  history_window: 3
+  run_id: case_map_b_llm_a2a
+  results_root: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/results/a2a_case_study
+agents:
+  num_agents: 6
+  agent_0:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Assistant
+    enable_a2a_protocol: true
+    agent_card_id: agent_1
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_1_prep_wash_support.json
+    agent_card_summary: This agent is a prep-and-wash support specialist in heterogeneous_map_b.
+      It can access the prep table and sink, assist with dish and counter support,
+      but cannot operate grill, mixer, oven, blender, pot, or steamer tools.
+  agent_1:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Assistant
+    enable_a2a_protocol: true
+    agent_card_id: agent_2
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_2_grill_mix_support.json
+    agent_card_summary: This agent is a grill-and-mixer support runner. It can operate
+      the grill and mixer, help with hot-food relay, and use shared counters, but
+      it cannot access pot, oven, blender, chopping-board, prep-table, sink, or steamer
+      tools.
+  agent_2:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Chef
+    enable_a2a_protocol: true
+    agent_card_id: agent_3
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_3_oven_blender_pot_chef.json
+    agent_card_summary: This agent is a core chef in heterogeneous_map_b. It can access
+      oven, blender, and pot tools for major hot-food stages, but it cannot use grill,
+      mixer, chopping-board, sink, prep-table, or steamer tools.
+  agent_3:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Chef
+    enable_a2a_protocol: true
+    agent_card_id: agent_4
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_4_oven_blender_pot_chef.json
+    agent_card_summary: This agent is another core chef in heterogeneous_map_b. It
+      can access oven, blender, and pot tools for major hot-food stages, but it cannot
+      use grill, mixer, chopping-board, sink, prep-table, or steamer tools.
+  agent_4:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Chef
+    enable_a2a_protocol: true
+    agent_card_id: agent_5
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_5_oven_blender_pot_chef.json
+    agent_card_summary: This agent is a third core chef in heterogeneous_map_b. It
+      can access oven, blender, and pot tools for major hot-food stages, but it cannot
+      use grill, mixer, chopping-board, sink, prep-table, or steamer tools.
+  agent_5:
+    type: custom_api
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    temperature: 0.1
+    max_tokens: 512
+    timeout: 120
+    max_retries: 3
+    role: Assistant
+    enable_a2a_protocol: true
+    agent_card_id: agent_6
+    agent_card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_6_cut_steamer_support.json
+    agent_card_summary: This agent is a cut-and-steamer support specialist in heterogeneous_map_b.
+      It can operate the chopping board and steamer for preprocessing and a parallel
+      cook lane, but it cannot access pot, oven, grill, blender, mixer, prep-table,
+      or sink tools.
+  _agent_card_index: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/index.json
+  _agent_card_layout: heterogeneous_map_b
+  _agent_card_meta:
+  - runtime_agent: agent_0
+    card_agent_id: agent_1
+    card_file: agent_1_prep_wash_support.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_1_prep_wash_support.json
+    role: Assistant
+    reachable_tools:
+    - prep_table
+    - water
+    - counter
+    - dish_dispenser
+    supported_instructions:
+    - use_prep_table
+    - wash_dishes
+    - pickup_ingredient
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_3
+    - agent_4
+    - agent_5
+    prompt_summary: This agent is a prep-and-wash support specialist in heterogeneous_map_b.
+      It can access the prep table and sink, assist with dish and counter support,
+      but cannot operate grill, mixer, oven, blender, pot, or steamer tools.
+  - runtime_agent: agent_1
+    card_agent_id: agent_2
+    card_file: agent_2_grill_mix_support.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_2_grill_mix_support.json
+    role: Assistant
+    reachable_tools:
+    - grill
+    - mixer
+    - counter
+    supported_instructions:
+    - use_grill
+    - use_mixer
+    - pick_finished_food
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_3
+    - agent_4
+    - agent_5
+    prompt_summary: This agent is a grill-and-mixer support runner. It can operate
+      the grill and mixer, help with hot-food relay, and use shared counters, but
+      it cannot access pot, oven, blender, chopping-board, prep-table, sink, or steamer
+      tools.
+  - runtime_agent: agent_2
+    card_agent_id: agent_3
+    card_file: agent_3_oven_blender_pot_chef.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_3_oven_blender_pot_chef.json
+    role: Chef
+    reachable_tools:
+    - oven
+    - blender
+    - pot
+    - counter
+    supported_instructions:
+    - use_pot
+    - use_oven
+    - use_blender
+    - pick_finished_food
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_1
+    - agent_2
+    - agent_6
+    prompt_summary: This agent is a core chef in heterogeneous_map_b. It can access
+      oven, blender, and pot tools for major hot-food stages, but it cannot use grill,
+      mixer, chopping-board, sink, prep-table, or steamer tools.
+  - runtime_agent: agent_3
+    card_agent_id: agent_4
+    card_file: agent_4_oven_blender_pot_chef.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_4_oven_blender_pot_chef.json
+    role: Chef
+    reachable_tools:
+    - oven
+    - blender
+    - pot
+    - counter
+    supported_instructions:
+    - use_pot
+    - use_oven
+    - use_blender
+    - pick_finished_food
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_1
+    - agent_2
+    - agent_6
+    prompt_summary: This agent is another core chef in heterogeneous_map_b. It can
+      access oven, blender, and pot tools for major hot-food stages, but it cannot
+      use grill, mixer, chopping-board, sink, prep-table, or steamer tools.
+  - runtime_agent: agent_4
+    card_agent_id: agent_5
+    card_file: agent_5_oven_blender_pot_chef.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_5_oven_blender_pot_chef.json
+    role: Chef
+    reachable_tools:
+    - oven
+    - blender
+    - pot
+    - counter
+    supported_instructions:
+    - use_pot
+    - use_oven
+    - use_blender
+    - pick_finished_food
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_1
+    - agent_2
+    - agent_6
+    prompt_summary: This agent is a third core chef in heterogeneous_map_b. It can
+      access oven, blender, and pot tools for major hot-food stages, but it cannot
+      use grill, mixer, chopping-board, sink, prep-table, or steamer tools.
+  - runtime_agent: agent_5
+    card_agent_id: agent_6
+    card_file: agent_6_cut_steamer_support.json
+    card_path: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/collab_overcooked/agent_cards/heterogeneous_map_b/agent_6_cut_steamer_support.json
+    role: Assistant
+    reachable_tools:
+    - chopping_board
+    - steamer
+    - counter
+    supported_instructions:
+    - use_chopping_board
+    - use_steamer
+    - pickup_ingredient
+    - place_on_counter
+    - ack_request
+    default_request_targets:
+    - agent_3
+    - agent_4
+    - agent_5
+    prompt_summary: This agent is a cut-and-steamer support specialist in heterogeneous_map_b.
+      It can operate the chopping board and steamer for preprocessing and a parallel
+      cook lane, but it cannot access pot, oven, grill, blender, mixer, prep-table,
+      or sink tools.
+evaluation:
+  metrics:
+  - f1_score
+  - similarity
+  - redundancy
+  - collaboration_initiate
+  - collaboration_respond
+  output_dir: ./results
+  save_trajectories: true
+logging:
+  level: INFO
+  save_logs: true
+  log_dir: ./logs
+paths:
+  prompts_dir: ./collab_overcooked/prompts
+  layouts_dir: ./dependencies/overcooked_ai/overcooked_ai_py/data/layouts
+  results_dir: ./results
+_experiment:
+  id: E8
+  mode: llm
+  T: 100
+  num_tasks: 4
+  difficulty:
+  - 1
+  - 2
+  - 3
+  - 4
+  orders:
+  - boiled_egg
+  - baked_potato_slices
+  - baked_carrot_soup
+  - sliced_bell_pepper_and_corn_stew
+  purpose: paper main group
+_case_study:
+  name: case_map_b_llm_a2a
+  description: 'Positive case: cross-map transfer to heterogeneous_map_b with only
+    map/card changes.'
+  base_config: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/configs/exp/E8_llm_T100.yaml
+  layout: heterogeneous_map_b
+  card_layout: heterogeneous_map_b
+  orders:
+  - boiled_egg
+  - baked_potato_slices
+  - sliced_bell_pepper_and_corn_stew
+  scheduler_enabled: true
+  scheduler_mode: llm
+  a2a_enabled: true
+  results_root: /Users/lijiayi/Desktop/graduate project/code/Collab-Overcooked/results/a2a_case_study
+  expected_logs:
+  - global_scheduler.logs
+  - a2a_protocol_log
+  - completion_events
+  - process_rewards
+  - content[*].statistical_data.communication

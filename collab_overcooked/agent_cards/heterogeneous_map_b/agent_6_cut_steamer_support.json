@@ -1,0 +1,99 @@
+{
+  "agent_id": "agent_6",
+  "name": "agent_6_cut_steamer_support",
+  "display_name": "Agent 6",
+  "role": "Assistant",
+  "layout_name": "heterogeneous_map_b",
+  "capabilities": [
+    "cut_task",
+    "steam_task",
+    "counter_transfer",
+    "ingredient_transfer"
+  ],
+  "forbidden_capabilities": [
+    "pot_task",
+    "oven_task",
+    "grill_task",
+    "blend_task",
+    "mix_task",
+    "wash_task",
+    "prep_task"
+  ],
+  "can_handle_tasks": [
+    "use_chopping_board",
+    "use_steamer",
+    "stage_ingredients",
+    "handoff_support"
+  ],
+  "can_receive_requests": [
+    "use_chopping_board",
+    "use_steamer",
+    "pickup_ingredient",
+    "place_on_counter"
+  ],
+  "reachable_tools": [
+    "chopping_board",
+    "steamer",
+    "counter"
+  ],
+  "unreachable_tools": [
+    "pot",
+    "oven",
+    "grill",
+    "blender",
+    "mixer",
+    "water",
+    "prep_table"
+  ],
+  "reachable_zones": [
+    "cut_lane",
+    "steamer_lane",
+    "shared_counter"
+  ],
+  "counter_access": true,
+  "preferred_stages": [
+    "cut",
+    "steam",
+    "handoff"
+  ],
+  "avoid_stages": [
+    "cook",
+    "bake",
+    "blend",
+    "mix",
+    "wash"
+  ],
+  "priority_bias": {
+    "cut_job": 1.0,
+    "steamer_job": 1.0,
+    "handoff_job": 0.8
+  },
+  "a2a_enabled": true,
+  "accepted_message_types": [
+    "REQUEST",
+    "INFORM",
+    "PROPOSE",
+    "ACK"
+  ],
+  "supported_instructions": [
+    "use_chopping_board",
+    "use_steamer",
+    "pickup_ingredient",
+    "place_on_counter",
+    "ack_request"
+  ],
+  "default_request_targets": [
+    "agent_3",
+    "agent_4",
+    "agent_5"
+  ],
+  "prompt_summary": "This agent is a cut-and-steamer support specialist in heterogeneous_map_b. It can operate the chopping board and steamer for preprocessing and a parallel cook lane, but it cannot access pot, oven, grill, blender, mixer, prep-table, or sink tools.",
+  "extra": {
+    "reachable_tool_symbols": [
+      "C",
+      "H"
+    ],
+    "map_group": "CH",
+    "notes": "Tool accessibility provided by map design and user specification."
+  }
+}

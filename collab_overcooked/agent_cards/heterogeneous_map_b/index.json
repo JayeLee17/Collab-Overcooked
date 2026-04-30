@@ -1,0 +1,30 @@
+{
+  "layout_name": "heterogeneous_map_b",
+  "description": "Agent cards for the 6-agent heterogeneous_map_b kitchen layout.",
+  "agents": [
+    {
+      "agent_id": "agent_1",
+      "card_file": "agent_1_prep_wash_support.json"
+    },
+    {
+      "agent_id": "agent_2",
+      "card_file": "agent_2_grill_mix_support.json"
+    },
+    {
+      "agent_id": "agent_3",
+      "card_file": "agent_3_oven_blender_pot_chef.json"
+    },
+    {
+      "agent_id": "agent_4",
+      "card_file": "agent_4_oven_blender_pot_chef.json"
+    },
+    {
+      "agent_id": "agent_5",
+      "card_file": "agent_5_oven_blender_pot_chef.json"
+    },
+    {
+      "agent_id": "agent_6",
+      "card_file": "agent_6_cut_steamer_support.json"
+    }
+  ]
+}
