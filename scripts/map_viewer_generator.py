@@ -27,6 +27,10 @@ SYMBOL_MAP = {
     "O": ("oven", "O", "cell-oven"),
     "C": ("chopping_board", "C", "cell-chopping"),
     "B": ("blender", "B", "cell-blender"),
+    "G": ("grill", "G", "cell-grill"),
+    "H": ("steamer", "H", "cell-steamer"),
+    "K": ("prep_table", "K", "cell-prep"),
+    "M": ("mixer", "M", "cell-mixer"),
     "W": ("water", "W", "cell-water"),
     "D": ("dish_dispenser", "D", "cell-dish"),
     "S": ("serving", "★", "cell-serving"),
@@ -49,9 +53,27 @@ def parse_layout(layout_path: str) -> dict:
         data = eval(raw)
 
     grid_str = data["grid"]
-    rows = [row.strip() for row in grid_str.strip().split("\n")]
+    rows = grid_str.splitlines()
+    while rows and rows[0] == "":
+        rows.pop(0)
+    while rows and rows[-1] == "":
+        rows.pop()
     if not rows:
         raise ValueError("Empty grid")
+
+    first_row = rows[0].lstrip(" ")
+    remaining_rows = rows[1:]
+    nonempty_remaining = [row for row in remaining_rows if row.strip()]
+    if nonempty_remaining:
+        shared_indent = min(
+            len(row) - len(row.lstrip(" "))
+            for row in nonempty_remaining
+        )
+        remaining_rows = [
+            row[shared_indent:] if len(row) >= shared_indent else ""
+            for row in remaining_rows
+        ]
+    rows = [first_row] + remaining_rows
 
     grid = []
     agents = []  # list of { "id": 0..n, "x": col, "y": row }
@@ -75,7 +97,7 @@ def parse_layout(layout_path: str) -> dict:
         "grid": grid,
         "agents": agents,
         "height": len(grid),
-        "width": len(grid[0]) if grid else 0,
+        "width": max((len(row) for row in grid), default=0),
     }
 
 
@@ -94,7 +116,8 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
     body {{ margin: 20px; font-family: sans-serif; background: #f5f0e6; }}
     h1 {{ margin-bottom: 12px; color: #333; }}
     .map-container {{ display: inline-block; padding: 8px; background: #4a3728; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }}
-    .map-grid {{ display: grid; gap: 2px; border: 2px solid #3d2e22; border-radius: 4px; overflow: hidden; }}
+    .map-grid {{ display: flex; flex-direction: column; gap: 2px; border: 2px solid #3d2e22; border-radius: 4px; overflow: hidden; align-items: flex-start; }}
+    .map-row {{ display: flex; gap: 2px; }}
     .cell {{ width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; color: #333; }}
     .cell-wall {{ background: #5c4033; }}
     .cell-floor {{ background: #e8dcc4; }}
@@ -102,6 +125,10 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
     .cell-oven {{ background: #6b4423; color: #f4d03f; }}
     .cell-chopping {{ background: #7d5a3c; color: #fff; }}
     .cell-blender {{ background: #6b4423; color: #ddd; }}
+    .cell-grill {{ background: #8a4b2a; color: #ffd27f; }}
+    .cell-steamer {{ background: #6d7d8c; color: #ffffff; }}
+    .cell-prep {{ background: #8d6e63; color: #fff; }}
+    .cell-mixer {{ background: #5f4b8b; color: #efe6ff; }}
     .cell-water {{ background: #4a6fa5; color: #fff; }}
     .cell-dish {{ background: #8b7355; color: #fff; }}
     .cell-serving {{ background: #3d2e22; color: #f4d03f; font-size: 24px; }}
@@ -132,8 +159,6 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
       const {{ grid, agents }} = DATA;
       const mapEl = document.getElementById('map');
       const legendEl = document.getElementById('legend');
-      mapEl.style.gridTemplateColumns = `repeat(${{grid[0].length}}, 48px)`;
-      mapEl.style.gridTemplateRows = `repeat(${{grid.length}}, 48px)`;
       mapEl.innerHTML = '';
 
       const agentAt = {{}};
@@ -144,6 +169,8 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
       }});
 
       for (let y = 0; y < grid.length; y++) {{
+        const rowEl = document.createElement('div');
+        rowEl.className = 'map-row';
         for (let x = 0; x < grid[y].length; x++) {{
           const cell = grid[y][x];
           const key = y + ',' + x;
@@ -159,8 +186,9 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
           }} else {{
             div.textContent = cell.symbol || '';
           }}
-          mapEl.appendChild(div);
+          rowEl.appendChild(div);
         }}
+        mapEl.appendChild(rowEl);
       }}
 
       const items = [
@@ -170,6 +198,10 @@ def build_html(data: dict, title: str = "Overcooked Map") -> str:
         ['cell-oven', '烤箱 O'],
         ['cell-chopping', '砧板 C'],
         ['cell-blender', '搅拌机 B'],
+        ['cell-grill', '烤架 G'],
+        ['cell-steamer', '蒸锅 H'],
+        ['cell-prep', '备菜台 K'],
+        ['cell-mixer', '混合台 M'],
         ['cell-water', '水池 W'],
         ['cell-dish', '盘子 D'],
         ['cell-serving', '出菜 ★'],

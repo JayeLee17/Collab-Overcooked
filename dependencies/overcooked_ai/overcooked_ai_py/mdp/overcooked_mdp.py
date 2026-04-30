@@ -618,8 +618,37 @@ class OvercookedGridworld(object):
         del base_layout_params['grid']
         base_layout_params['layout_name'] = layout_name
 
-        # Clean grid
-        grid = [layout_row.strip() for layout_row in grid.split("\n")]
+        # Normalize inline triple-quoted grid strings.
+        # Most layout files keep the first row on the same line as """ and indent
+        # the remaining rows for readability, so we remove the first row's leading
+        # spaces and strip the shared indentation from the remaining rows only.
+        grid_rows = grid.splitlines()
+        while grid_rows and grid_rows[0] == "":
+            grid_rows.pop(0)
+        while grid_rows and grid_rows[-1] == "":
+            grid_rows.pop()
+
+        if grid_rows:
+            first_row = grid_rows[0].lstrip(" ")
+            remaining_rows = grid_rows[1:]
+            nonempty_remaining = [row for row in remaining_rows if row.strip()]
+            if nonempty_remaining:
+                shared_indent = min(
+                    len(row) - len(row.lstrip(" "))
+                    for row in nonempty_remaining
+                )
+                remaining_rows = [
+                    row[shared_indent:] if len(row) >= shared_indent else ""
+                    for row in remaining_rows
+                ]
+            grid = [first_row] + remaining_rows
+            max_width = max(len(row) for row in grid)
+            # Keep author-facing layout files free to describe non-rectangular
+            # shapes (for example an L-shaped map). The simulator still expects a
+            # rectangular terrain matrix, so we right-pad missing cells as walls.
+            grid = [row.ljust(max_width, "X") for row in grid]
+        else:
+            grid = []
         return OvercookedGridworld.from_grid(grid, base_layout_params, params_to_overwrite)
 
     @staticmethod
@@ -858,8 +887,33 @@ class OvercookedGridworld(object):
     def get_oven_locations(self):
         return list(self.terrain_pos_dict['O'])
 
+    def get_grill_locations(self):
+        return list(self.terrain_pos_dict['G'])
+
+    def get_steamer_locations(self):
+        return list(self.terrain_pos_dict['H'])
+
+    def get_prep_table_locations(self):
+        return list(self.terrain_pos_dict['K'])
+
+    def get_mixer_locations(self):
+        return list(self.terrain_pos_dict['M'])
+
     def get_counter_locations(self):
         return list(self.terrain_pos_dict['X'])
+
+    def get_operation_for_terrain_type(self, terrain_type):
+        for utensil in self.utensils.values():
+            if utensil["symbol"] == terrain_type:
+                return utensil["operation"]
+        return None
+
+    def get_interact_action_name(self, terrain_type, pos):
+        operation = self.get_operation_for_terrain_type(terrain_type)
+        utensil_name = self.from_pos_to_utensil_name(pos)
+        if operation in {"cook", "cut", "bake", "stir"}:
+            return f"{operation}({utensil_name})"
+        return f"interact({utensil_name})"
     
     def from_pos_to_utensil_name(self, pos):
         target_symbol = ''
@@ -1108,6 +1162,9 @@ class OvercookedGridworld(object):
         # nearly_ready_pots = cooking_pots + pot_states["tomato"]["partially_full"] + pot_states["onion"]["partially_full"]
 
         sparse_reward, shaped_reward, ml_actions = 0, 0, [None] * self.num_players
+        # Per-step utensil mutex: track which utensil positions have been
+        # claimed by an agent THIS step to prevent double-interact.
+        _utensil_claimed_this_step = {}  # {(x,y): agent_index}
         for i, (player, action) in enumerate(zip(new_state.players, joint_action)):
             if action != Action.INTERACT:
                 continue
@@ -1115,6 +1172,20 @@ class OvercookedGridworld(object):
             pos, o = player.position, player.orientation
             i_pos = Action.move_in_direction(pos, o) # imagine to move to the intection place
             terrain_type = self.get_terrain_type_at_pos(i_pos)
+
+            # Shared-resource mutex: for interactive terrain (chopping_board, blender, etc.)
+            # and pots/ovens, only one agent may interact per step.
+            _exclusive_terrain = set(getattr(self, 'interactive_terrain', []))
+            _exclusive_terrain.update({'P', 'O'})
+            if terrain_type in _exclusive_terrain:
+                if i_pos in _utensil_claimed_this_step:
+                    winner = _utensil_claimed_this_step[i_pos]
+                    utensil_label = self.from_pos_to_utensil_name(i_pos) if hasattr(self, 'from_pos_to_utensil_name') else str(i_pos)
+                    print(f"[ResourceLock] t={getattr(new_state, 'timestep', '?')} "
+                          f"A{i} BLOCKED from {utensil_label} "
+                          f"(already claimed by A{winner} this step)")
+                    continue
+                _utensil_claimed_this_step[i_pos] = i
 
             if terrain_type == 'X':
                 if player.has_object() and not new_state.has_object(i_pos):
@@ -1160,14 +1231,7 @@ class OvercookedGridworld(object):
                   new_state.get_object(i_pos).catagory == 'semi-finished' and
                   new_state.get_object(i_pos).state[2] == 0 and
                   parm[i] == '[START]'):
-                if terrain_type == 'P':
-                    ml_actions[i] = f'cook({self.from_pos_to_utensil_name(i_pos)})'
-                elif terrain_type == 'C':
-                    ml_actions[i] = f'cut({self.from_pos_to_utensil_name(i_pos)})'
-                elif terrain_type == 'O':
-                    ml_actions[i] = f'bake({self.from_pos_to_utensil_name(i_pos)})'
-                elif terrain_type == 'B':
-                    ml_actions[i] = f'stir({self.from_pos_to_utensil_name(i_pos)})'
+                ml_actions[i] = self.get_interact_action_name(terrain_type, i_pos)
 
             elif terrain_type == 'P' and player.has_object():
                 if player.get_object().name == 'dish' and new_state.has_object(i_pos):
@@ -1200,10 +1264,17 @@ class OvercookedGridworld(object):
                         # assert obj.name in self.Recipe.recipe_name, 'Object in pot was not soup'
                         soup_type, num_items, cook_time = obj.state
                         if num_items < self.num_items_for_soup:
-                            player.remove_object()
-                            soup_type.append(item_type)
-                            obj.state = (soup_type, num_items + 1, 0)
-                            shaped_reward += self.reward_shaping_params["PLACEMENT_IN_POT_REW"]
+                            utensil_name = self.from_pos_to_utensil_name(i_pos)
+                            if self._can_extend_utensil_recipe(obj, utensil_name, item_type):
+                                player.remove_object()
+                                soup_type.append(item_type)
+                                obj.state = (soup_type, num_items + 1, 0)
+                                shaped_reward += self.reward_shaping_params["PLACEMENT_IN_POT_REW"]
+                            else:
+                                print(
+                                    f"[RecipeGuard] t={getattr(new_state, 'timestep', '?')} "
+                                    f"BLOCK add '{item_type}' into {utensil_name}; current={soup_type}"
+                                )
                     
                     ml_actions[i] = f'put_obj_in_utensil({self.from_pos_to_utensil_name(i_pos)})'
 
@@ -1238,10 +1309,16 @@ class OvercookedGridworld(object):
                         soup_type, num_items, cook_time = obj.state
                         assert isinstance(soup_type, list), "Validator error, Ingredients should not be placed in cooking utensils"
                         if num_items < self.num_items_for_soup:
-                            player.remove_object()
-                            soup_type.append(item_type)
-                            obj.state = (soup_type, num_items + 1, 0)
-                            shaped_reward += self.reward_shaping_params["PLACEMENT_IN_POT_REW"]
+                            if self._can_extend_utensil_recipe(obj, utensil_name, item_type):
+                                player.remove_object()
+                                soup_type.append(item_type)
+                                obj.state = (soup_type, num_items + 1, 0)
+                                shaped_reward += self.reward_shaping_params["PLACEMENT_IN_POT_REW"]
+                            else:
+                                print(
+                                    f"[RecipeGuard] t={getattr(new_state, 'timestep', '?')} "
+                                    f"BLOCK add '{item_type}' into {utensil_name}; current={soup_type}"
+                                )
                     
                     ml_actions[i] = f'put_obj_in_utensil({self.from_pos_to_utensil_name(i_pos)})'
                 
@@ -1265,12 +1342,34 @@ class OvercookedGridworld(object):
                                 player.set_object(ObjectState(parm[i], 'ingredient', pos))
                                 
                         ml_actions[i] = f'pickup({parm[i]}, {self.from_pos_to_utensil_name(i_pos)})'
-                    elif  (isinstance(name, str) and cook_time >= self.Recipe.recipe_list[name]['cook_time']) or (isinstance(name, list) and cook_time >= self.Recipe.recipe_list[name[0]]['cook_time']):
-                        # player.remove_object()  # Turn the dish into the soup
-                        player.set_object(new_state.remove_object(i_pos))
-                        shaped_reward += self.reward_shaping_params["SOUP_PICKUP_REWARD"]
-                        
-                        ml_actions[i] = f'pickup({name}, {self.from_pos_to_utensil_name(i_pos)})'
+                    else:
+                        # Finished soup pickup (no ingredient parm): cook_time must match recipe.
+                        # For list state, name[0] is an INGREDIENT — never use it as recipe_list key.
+                        cooked_enough = False
+                        if isinstance(name, str) and name in self.Recipe.recipe_list:
+                            cooked_enough = cook_time >= self.Recipe.recipe_list[name]['cook_time']
+                        elif isinstance(name, list):
+                            utensil_name = next(
+                                (
+                                    un
+                                    for un, properties in self.utensils.items()
+                                    if properties["symbol"] == terrain_type
+                                ),
+                                None,
+                            )
+                            if utensil_name is not None:
+                                recipe_key = self.match_recipe(obj, utensil_name)
+                                if recipe_key is not None:
+                                    cooked_enough = (
+                                        cook_time
+                                        >= self.Recipe.recipe_list[recipe_key]["cook_time"]
+                                    )
+                        if cooked_enough:
+                            # player.remove_object()  # Turn the dish into the soup
+                            player.set_object(new_state.remove_object(i_pos))
+                            shaped_reward += self.reward_shaping_params["SOUP_PICKUP_REWARD"]
+
+                            ml_actions[i] = f'pickup({name}, {self.from_pos_to_utensil_name(i_pos)})'
 
 
             elif terrain_type == 'S' and player.has_object():
@@ -1299,38 +1398,59 @@ class OvercookedGridworld(object):
     def deliver_soup(self, state, player, soup_obj):
         """
         Deliver the soup, and get reward if there is no order list
-        or if the type of the delivered soup matches the next order.
+        or if the type of the delivered soup matches any order in the list.
         """
         if soup_obj.state == None:
             soup_type = soup_obj.name
 
         else:
             soup_type, num_items, cook_time = soup_obj.state
-            # assert soup_type in ObjectState.SOUP_TYPES
-            # assert num_items == self.num_items_for_soup
             assert cook_time >= self.Recipe.recipe_list[soup_type]['cook_time'], "Cook time {} mdp cook time {}".format(cook_time, self.recipe_config['recipes'][state.curr_order]['cook_time'])
         player.remove_object()
 
+        state._last_delivered_order = None
+
         if state.order_list is None:
+            state._last_delivered_order = soup_type
             return state, self.delivery_reward
     
-        # If the delivered soup is the one currently required
         assert not self.is_terminal(state)
-        current_order = state.order_list[0]
-        if current_order == 'any' or soup_type == current_order:
-            if (soup_type in self.Recipe.recipe_need_dish) and soup_obj.catagory == 'with_dish':
-                state.order_list = state.order_list[1:]
-                if len(state.order_list) <= state.k_order:
-                    state.order_list = self.add_elements_based_on_probability(state.order_list, self.order_probability)
-                return state, self.delivery_reward
-            elif soup_type not in self.Recipe.recipe_need_dish and soup_obj.catagory != 'with_dish':
-                state.order_list = state.order_list[1:]
-                if len(state.order_list) <= state.k_order:
-                    state.order_list = self.add_elements_based_on_probability(state.order_list, self.order_probability)
-                return state, self.delivery_reward
 
-        
+        # Match against ANY order in the list (not just [0])
+        for idx, order in enumerate(state.order_list):
+            if order == 'any' or soup_type == order:
+                needs_dish = soup_type in self.Recipe.recipe_need_dish
+                has_dish = soup_obj.catagory == 'with_dish'
+                if (needs_dish and has_dish) or (not needs_dish and not has_dish):
+                    state._last_delivered_order = order
+                    state.order_list = state.order_list[:idx] + state.order_list[idx+1:]
+                    if len(state.order_list) <= state.k_order:
+                        state.order_list = self.add_elements_based_on_probability(state.order_list, self.order_probability)
+                    return state, self.delivery_reward
+
         return state, 0
+
+    def _can_extend_utensil_recipe(self, obj, utensil_name, item_type):
+        """Check whether adding one ingredient keeps recipe feasibility.
+
+        Used to guard shared utensils (especially chopping_board0) from cross-task
+        contamination such as mixing mushroom + potato in one board.
+        """
+        try:
+            if obj is None or not hasattr(obj, "state"):
+                return True
+            soup_type, _, _ = obj.state
+            if not isinstance(soup_type, list):
+                return False
+            proposed = list(soup_type) + [item_type]
+            recipes = self.Recipe.recipe_config.get(utensil_name, {})
+            for _, detail in recipes.items():
+                recipe_items = detail.get("recipe", [])
+                if isinstance(recipe_items, list) and Counter(proposed) <= Counter(recipe_items):
+                    return True
+            return False
+        except Exception:
+            return False
 
     def match_recipe(self, soup_obj, utensil_name):
         soup_type, _, _ = soup_obj.state
@@ -1532,7 +1652,7 @@ class OvercookedGridworld(object):
 
         # Borders must not be free spaces
         def is_not_free(c):
-            return c in 'XOPDSTICBW'  # Add ingredient grid
+            return c in 'XOPCDSTIBWGHKM'  # Add ingredient grid and heterogeneous tool symbols
 
         for y in range(height):
             assert is_not_free(grid[y][0]), 'Left border must not be free'
@@ -1550,12 +1670,12 @@ class OvercookedGridworld(object):
         assert layout_digits == list(range(1, num_players + 1)), "Some players were missing"
 
         # add ingredient
-        assert all(c in 'XOPCDSTIBW123456789 ' for c in all_elements), 'Invalid character in grid'
+        assert all(c in 'XOPCDSTIBWGHKM123456789 ' for c in all_elements), 'Invalid character in grid'
         assert all_elements.count('1') == 1, "'1' must be present exactly once"
         assert all_elements.count('D') >= 1, "'D' must be present at least once"
         assert all_elements.count('S') >= 1, "'S' must be present at least once"
-        assert all_elements.count('P') >= 1, "'P' must be present at least once"
-        assert all_elements.count('O') >= 1 or all_elements.count('T') >= 1 or all_elements.count('I') >= 0, "'O' or 'T' or 'I' must be present at least once"
+        assert all_elements.count('P') >= 1 or all_elements.count('H') >= 1, "'P' or 'H' must be present at least once"
+        assert all_elements.count('O') >= 1 or all_elements.count('G') >= 1 or all_elements.count('T') >= 1 or all_elements.count('I') >= 0, "'O' or 'G' or 'T' or 'I' must be present at least once"
 
     #####################
     # TERMINAL GRAPHICS #

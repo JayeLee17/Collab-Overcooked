@@ -4,6 +4,7 @@ import os
 import json
 import datetime
 import uuid
+import re
 from argparse import ArgumentParser
 from pathlib import Path
 import numpy as np
@@ -129,8 +130,16 @@ try:
             response_language=agent_config.get("response_language", agent_config.get("language")),
         )
 
-        if agent_config.get("api_key"):
-            agent.api_key = agent_config["api_key"]
+        agent.enable_a2a_protocol = bool(
+            agent_config.get("enable_a2a_protocol", True)
+        )
+
+        agent.api_key = (
+            agent_config.get("api_key")
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("API_KEY")
+        )
 
         agent.set_mdp(mdp)
         return agent
@@ -142,6 +151,135 @@ except ImportError:
     make_agent_from_config = None
 
 import socket
+
+
+def _task_order_tokens(order_name: str):
+    """Extract stable semantic tokens from an order name."""
+    if not order_name:
+        return set()
+    stop = {"and", "with", "soup", "stew", "patty", "boiled", "baked", "sliced", "mashed"}
+    toks = [t for t in str(order_name).lower().split("_") if t and t not in stop]
+    return set(toks)
+
+
+def _state_object_names(state):
+    names = []
+    if state is None:
+        return names
+    for obj in getattr(state, "objects", {}).values():
+        n = str(getattr(obj, "name", "") or "").lower()
+        if n:
+            names.append(n)
+        # semi-finished objects may store recipe progress in state tuple/list
+        st = getattr(obj, "state", None)
+        if isinstance(st, (tuple, list)) and len(st) > 0:
+            s0 = st[0]
+            if isinstance(s0, str):
+                names.append(s0.lower())
+            elif isinstance(s0, list):
+                for x in s0:
+                    if isinstance(x, str):
+                        names.append(x.lower())
+    return names
+
+
+def _estimate_task_progress(task, state, mdp, agents):
+    """
+    Unified 4-stage task progress (0.0 / 0.25 / 0.5 / 0.75 / 1.0).
+    Uses task status + env object/action signals only (no reference).
+    """
+    if not isinstance(task, dict):
+        return 0.0
+    status = str(task.get("status", "pending")).lower()
+    if status == "completed":
+        return 1.0
+
+    order_name = str(task.get("order", "") or task.get("name", "") or "")
+    tokens = _task_order_tokens(order_name)
+    obj_names = _state_object_names(state)
+
+    # Stage 1: started (claimed/assigned or start_time exists)
+    started = bool(task.get("claimed_by")) or task.get("start_time") is not None or status in ("claimed", "in_progress")
+    progress = 0.25 if started else 0.0
+
+    # Collect participant actions/held-objects
+    participant_actions = []
+    participant_held = []
+    participants = set(task.get("claimed_by", []))
+    for ag in agents:
+        idx = getattr(ag, "agent_index", None)
+        if idx not in participants:
+            continue
+        participant_actions.append(str(getattr(ag, "current_ml_action", "") or "").lower())
+        if state is not None and hasattr(state, "players") and isinstance(idx, int) and 0 <= idx < len(state.players):
+            p = state.players[idx]
+            if p.has_object():
+                participant_held.append(str(p.get_object().name).lower())
+
+    # Generic stage signals
+    prep_kw = ("cut(", "slice", "chop", "mash", "prep", "board")
+    core_kw = ("cook(", "bake(", "stir(", "boil", "put_obj_in_utensil", "oven", "pot", "blender")
+    near_finish_kw = ("fill_dish_with_food", "pickup(", "deliver_soup")
+
+    prep_from_actions = any(any(k in a for k in prep_kw) for a in participant_actions)
+    core_from_actions = any(any(k in a for k in core_kw) for a in participant_actions)
+    near_finish_from_actions = any(any(k in a for k in near_finish_kw) for a in participant_actions)
+
+    # Object-based signals (lightweight, recipe-agnostic)
+    has_preprocessed_obj = any(("slices" in n) or ("mashed_" in n) for n in obj_names + participant_held)
+    has_core_processed_obj = any(
+        (n == order_name.lower()) or ("baked_" in n) or ("boiled_" in n)
+        for n in obj_names + participant_held
+    )
+
+    # Token overlap as weak evidence task is in workflow
+    token_hit = False
+    if tokens:
+        for n in obj_names + participant_held:
+            parts = set([t for t in re.split(r"[^a-z0-9_]+", n) if t])
+            if len(tokens.intersection(parts)) > 0:
+                token_hit = True
+                break
+
+    if prep_from_actions or has_preprocessed_obj or token_hit:
+        progress = max(progress, 0.5)
+    if core_from_actions or has_core_processed_obj:
+        progress = max(progress, 0.75)
+    if near_finish_from_actions and progress < 0.75:
+        progress = max(progress, 0.75)
+
+    return float(progress)
+
+
+def _compute_progress_score(task_pool, state, mdp, agents):
+    """Sum progress(task) over all tasks (active + historical)."""
+    if task_pool is None:
+        return 0.0
+    score = 0.0
+    for t in getattr(task_pool, "tasks", []):
+        score += _estimate_task_progress(t, state, mdp, agents)
+    return float(score)
+
+
+def _compute_blocked_count(global_scheduler):
+    """
+    Count blocked/timeout events from scheduler logs.
+    Reuses existing timeout/block release semantics.
+    """
+    try:
+        gs_dict = global_scheduler.to_dict() if global_scheduler is not None else {}
+    except Exception:
+        gs_dict = {}
+    logs = gs_dict.get("logs", []) if isinstance(gs_dict, dict) else []
+    cnt = 0
+    for step in logs:
+        if not isinstance(step, dict):
+            continue
+        for ev in step.get("events", []) or []:
+            evs = str(ev).lower()
+            if ("timeout" in evs and "release" in evs) or ("blocked" in evs):
+                cnt += 1
+    return cnt
 
 
 def load_config_from_yaml(config_path):
@@ -201,93 +339,6 @@ def convert_yaml_to_variant(config):
     }
     
     return variant
-
-
-# ---------------------------------------------------------------------------
-# Scoring helpers (low-intrusion, no reference needed)
-# ---------------------------------------------------------------------------
-
-# Weights for system_score = env_score + PROGRESS_WEIGHT * progress_score - BLOCKED_PENALTY * blocked_count
-_PROGRESS_WEIGHT: float = 5.0
-_BLOCKED_PENALTY: float = 2.0
-
-
-def _compute_progress_score(task_pool, state, mdp) -> float:
-    """Estimate progress for all *non-completed* tasks using a generic four-stage rule.
-
-    Stages (per task):
-        0.0 – pending (no agent assigned)
-        0.25 – claimed / in_progress (agents assigned, no advanced objects detected)
-        0.5  – semi-finished object found on map or held by assigned agent
-        0.75 – finished / with_dish object found on map or held by assigned agent
-        1.0  – task already completed (excluded from sum to avoid double-counting env_score)
-
-    We only sum over tasks that are NOT yet completed.
-    """
-    if state is None:
-        return 0.0
-
-    # Gather all objects currently in the environment (on ground + held by players)
-    all_objects = list(state.objects.values()) if hasattr(state, "objects") else []
-    for player in (state.players if hasattr(state, "players") else []):
-        if player.held_object is not None:
-            all_objects.append(player.held_object)
-
-    # Build a fast per-category set for global checks
-    categories_present = {obj.catagory for obj in all_objects}
-
-    # Build per-agent held-object lookup: agent_index -> catagory or None
-    agent_held: dict = {}
-    if hasattr(state, "players"):
-        for idx, player in enumerate(state.players):
-            agent_held[idx] = player.held_object.catagory if player.held_object is not None else None
-
-    total = 0.0
-    for task in task_pool.tasks:
-        status = task.get("status", "pending")
-        if status == "completed":
-            # Exclude completed tasks to avoid double-counting env_score
-            continue
-
-        if status == "pending" and not task.get("claimed_by"):
-            total += 0.0
-            continue
-
-        # Task has at least one agent assigned → at minimum stage 1
-        assigned_agents = task.get("claimed_by", [])
-
-        # Check the most-advanced catagory held by agents on this task
-        best_held = None
-        for ag_idx in assigned_agents:
-            cat = agent_held.get(ag_idx)
-            if cat is None:
-                continue
-            _rank = {"ingredient": 1, "dish": 1, "semi-finished": 2, "finished": 3, "with_dish": 3}
-            if best_held is None or _rank.get(cat, 0) > _rank.get(best_held, 0):
-                best_held = cat
-
-        # Also consider global env objects (best available, not tied to specific task)
-        _global_best = None
-        for cat in ("with_dish", "finished", "semi-finished"):
-            if cat in categories_present:
-                _global_best = cat
-                break
-
-        # Merge: prefer per-agent over global heuristic if more advanced
-        _rank = {"ingredient": 1, "dish": 1, "semi-finished": 2, "finished": 3, "with_dish": 3}
-        effective = best_held if best_held else _global_best
-
-        if effective in ("finished", "with_dish"):
-            stage = 0.75
-        elif effective == "semi-finished":
-            stage = 0.5
-        else:
-            # ingredient held, or no helpful object detected → stage 1
-            stage = 0.25
-
-        total += stage
-
-    return total
 
 
 def main(variant=None, config_path=None):
@@ -369,6 +420,15 @@ def main(variant=None, config_path=None):
     # --- 创建 TaskPool ---
     num_concurrent_tasks = variant.get('yaml_config', {}).get('environment', {}).get('num_concurrent_tasks', 3)
     max_total_tasks = variant.get('yaml_config', {}).get('environment', {}).get('max_total_tasks', 0)
+    stagnation_no_completion_steps = variant.get('yaml_config', {}).get('environment', {}).get(
+        'stagnation_no_completion_steps', 0
+    )
+    stagnation_same_trigger_limit = variant.get('yaml_config', {}).get('environment', {}).get(
+        'stagnation_same_trigger_limit', 0
+    )
+    stagnation_min_timestep = variant.get('yaml_config', {}).get('environment', {}).get(
+        'stagnation_min_timestep', 0
+    )
     # 用 orders 列表初始化 TaskPool（直接使用配置的 orders，不再重复）
     task_pool = TaskPool(orders_list, num_concurrent_tasks=num_concurrent_tasks, max_total_tasks=max_total_tasks)
     print(f"\n[TaskPool] 初始化 {len(orders_list)} 个任务 (并发={num_concurrent_tasks}, max_total={max_total_tasks}): {orders_list}")
@@ -407,6 +467,18 @@ def main(variant=None, config_path=None):
         
         save_dir.mkdir(parents=True, exist_ok=True)
         filename = save_dir / f"experiment_{episode_stamp}_{order_name}.json"
+        statistics_dict["run_id"] = run_id
+        statistics_dict["layout"] = layout
+        statistics_dict["orders"] = list(orders_list)
+        statistics_dict["results_root"] = str(results_root)
+        statistics_dict["config_path"] = str(config_path) if config_path else None
+        statistics_dict["scheduler_mode"] = scheduler_cfg.get("mode", "off")
+        statistics_dict["scheduler_teacher_model"] = scheduler_cfg.get("model")
+        statistics_dict["num_concurrent_tasks"] = num_concurrent_tasks
+        statistics_dict["max_total_tasks"] = max_total_tasks
+        statistics_dict["stagnation_no_completion_steps"] = stagnation_no_completion_steps
+        statistics_dict["stagnation_same_trigger_limit"] = stagnation_same_trigger_limit
+        statistics_dict["stagnation_min_timestep"] = stagnation_min_timestep
 
         if mode == 'develop':
             """
@@ -576,6 +648,9 @@ def main(variant=None, config_path=None):
                 else:
                     print(f"  A{agent_idx} ({role}): 无任务")
             print("="*60 + "\n")
+            last_completion_t = -1
+            last_non_null_trigger = None
+            same_trigger_streak = 0
             
             for t in range(horizon):
                 s_t = env.state
@@ -596,16 +671,6 @@ def main(variant=None, config_path=None):
                     )
                     if sys_msgs:
                         print(f"[GlobalScheduler] t={t} emit {len(sys_msgs)} system messages")
-                    # Count cancel_assignment (timeout/no-progress) events → update blocked_count
-                    _step_logs = getattr(global_scheduler, "step_logs", [])
-                    if _step_logs:
-                        _latest_events = _step_logs[-1].get("events", [])
-                        _blocked_this_step = sum(
-                            1 for _ev in _latest_events
-                            if isinstance(_ev, dict) and _ev.get("action") == "cancel_assignment"
-                        )
-                        if _blocked_this_step:
-                            task_pool.record_blocked(_blocked_this_step)
                     for _msg in sys_msgs:
                         if isinstance(_msg.to, int):
                             for _recv in team.agents:
@@ -670,22 +735,77 @@ def main(variant=None, config_path=None):
                     print(f"[Wash] {newly_clean} 盘洗好，当前干净盘子: {mdp.clean_dishes_available}/{mdp.max_clean_dishes}")
 
                 if reward > 0:
-                    statistics_dict['total_order_finished'].append(s_t.current_k_order[0])
-                    # P1: 完成任务 + 触发洗碗
-                    # 找到刚完成 deliver 的 agent，标记其 task 完成
-                    for agent_idx, agent in enumerate(team.agents):
-                        agent_task = task_pool.get_agent_current_task(agent_idx)
-                        if agent_task is not None and agent_task["status"] in ("claimed", "in_progress"):
-                            task_pool.complete_task(agent_task["id"], t)
-                            task_pool.add_wash_job(t, wash_time)
-                            print(f"[TaskComplete] Task {agent_task['id']}({agent_task['order']}) 完成! 洗碗任务已加入队列")
-                            # P2-c: 补充新任务
-                            new_tasks = task_pool.replenish_tasks()
-                            if new_tasks:
-                                new_str = ", ".join(f"Task {nt['id']}({nt['order']})" for nt in new_tasks)
-                                print(f"[TaskPool] 补充新任务: {new_str}")
-                            print(task_pool.summary())
-                            break  # 一次 reward 只完成一个任务
+                    delivered_order = getattr(env.state, '_last_delivered_order', None) or (
+                        s_t.current_k_order[0] if s_t.order_list else "unknown"
+                    )
+                    statistics_dict['total_order_finished'].append(delivered_order)
+
+                    delivering_agent_idx = None
+                    for _mi, _ma in enumerate(ml_actions):
+                        if _ma and 'deliver_soup' in str(_ma):
+                            delivering_agent_idx = _mi
+                            break
+
+                    completed_task = None
+                    if delivering_agent_idx is not None:
+                        completed_task = task_pool.get_agent_current_task(delivering_agent_idx)
+                    if completed_task is None:
+                        for _ai, _ag in enumerate(team.agents):
+                            _at = task_pool.get_agent_current_task(_ai)
+                            if _at is not None and _at["status"] in ("claimed", "in_progress"):
+                                if _at["order"] == delivered_order:
+                                    completed_task = _at
+                                    delivering_agent_idx = _ai
+                                    break
+                    if completed_task is None:
+                        for _ai, _ag in enumerate(team.agents):
+                            _at = task_pool.get_agent_current_task(_ai)
+                            if _at is not None and _at["status"] in ("claimed", "in_progress"):
+                                completed_task = _at
+                                delivering_agent_idx = _ai
+                                break
+
+                    if completed_task is not None:
+                        task_pool.complete_task(completed_task["id"], t)
+                        task_pool.add_wash_job(t, wash_time)
+                        last_completion_t = t
+                        completion_event = {
+                            "timestamp": t,
+                            "task_id": completed_task["id"],
+                            "task_name": completed_task["order"],
+                            "delivered_order": delivered_order,
+                            "delivering_agent": delivering_agent_idx,
+                            "score_gain": reward,
+                            "total_score_after": r_total,
+                            "total_finished_after": len(statistics_dict['total_order_finished']),
+                        }
+                        statistics_dict.setdefault('completion_events', []).append(completion_event)
+                        print(f"[TaskComplete] t={t} agent=A{delivering_agent_idx} "
+                              f"task={completed_task['id']}({completed_task['order']}) "
+                              f"delivered={delivered_order} score_gain={reward} "
+                              f"total_score={r_total} finished={statistics_dict['total_order_finished']}")
+
+                        new_tasks = task_pool.replenish_tasks()
+                        if new_tasks:
+                            new_str = ", ".join(f"Task {nt['id']}({nt['order']})" for nt in new_tasks)
+                            print(f"[TaskReplenish] t={t} event=replenished new_tasks=[{new_str}] "
+                                  f"total_order_finished={statistics_dict['total_order_finished']} "
+                                  f"total_score={r_total}")
+                        print(task_pool.summary())
+                    else:
+                        statistics_dict.setdefault('completion_events', []).append({
+                            "timestamp": t,
+                            "task_id": None,
+                            "task_name": delivered_order,
+                            "delivered_order": delivered_order,
+                            "delivering_agent": delivering_agent_idx,
+                            "score_gain": reward,
+                            "total_score_after": r_total,
+                            "total_finished_after": len(statistics_dict['total_order_finished']),
+                            "warning": "no_matching_task_in_pool",
+                        })
+                        print(f"[TaskComplete] t={t} WARNING: reward={reward} delivered={delivered_order} "
+                              f"but no matching task found in pool")
 
                 rprint("[red]" + f'r: {reward} | total: {r_total}\n\n')
                 # Print behavior for all agents (supporting multiple agents)
@@ -715,6 +835,15 @@ def main(variant=None, config_path=None):
 
                 statistics_dict['total_timestamp'].append(t)
                 statistics_dict['total_score'] = r_total
+                # Added analysis-friendly score fields (low intrusion; keep total_score unchanged)
+                env_score = r_total
+                progress_score = _compute_progress_score(task_pool, env.state, mdp, team.agents)
+                blocked_count = _compute_blocked_count(global_scheduler)
+                system_score = env_score + progress_score - blocked_count
+                statistics_dict['env_score'] = env_score
+                statistics_dict['progress_score'] = progress_score
+                statistics_dict['blocked_count'] = blocked_count
+                statistics_dict['system_score'] = system_score
                 # Store action lists for all agents
                 statistics_dict['total_action_list'] = []
                 for agent_idx, agent in enumerate(team.agents):
@@ -727,20 +856,6 @@ def main(variant=None, config_path=None):
                 statistics_dict['task_pool'] = task_pool.to_dict()
                 statistics_dict['global_scheduler'] = global_scheduler.to_dict()
                 statistics_dict['scheduler_reference'] = global_scheduler.to_dict().get('scheduler_reference', [])
-                # ── Composite scoring ──────────────────────────────────────
-                _env_score = r_total
-                _progress_score = _compute_progress_score(task_pool, env.state, mdp)
-                _blocked_count = task_pool.stats.get("blocked_count", 0)
-                _system_score = (
-                    _env_score
-                    + _PROGRESS_WEIGHT * _progress_score
-                    - _BLOCKED_PENALTY * _blocked_count
-                )
-                statistics_dict['env_score'] = _env_score
-                statistics_dict['progress_score'] = round(_progress_score, 4)
-                statistics_dict['blocked_count'] = _blocked_count
-                statistics_dict['system_score'] = round(_system_score, 4)
-                # ────────────────────────────────────────────────────────
                 # A2A Protocol: 保存各 agent 的 A2A 消息日志（旁路记录，不影响实验逻辑）
                 statistics_dict['a2a_protocol_log'] = [
                     agent._a2a_protocol.to_dict()
@@ -749,6 +864,48 @@ def main(variant=None, config_path=None):
                 ]
                 with open(filename, 'w') as f:
                     json.dump(statistics_dict,f,indent=4)
+
+                latest_trigger = None
+                gs_logs = statistics_dict.get('global_scheduler', {}).get('logs', [])
+                if gs_logs:
+                    latest_log = gs_logs[-1]
+                    if latest_log.get("timestep") == t:
+                        latest_trigger = latest_log.get("trigger_type") or latest_log.get("trigger")
+                if latest_trigger:
+                    if latest_trigger == last_non_null_trigger:
+                        same_trigger_streak += 1
+                    else:
+                        last_non_null_trigger = latest_trigger
+                        same_trigger_streak = 1
+
+                stagnation_reason = None
+                if (
+                    stagnation_no_completion_steps
+                    and t >= max(0, int(stagnation_min_timestep or 0))
+                    and (t - last_completion_t) >= int(stagnation_no_completion_steps)
+                    and not task_pool.all_done()
+                ):
+                    stagnation_reason = (
+                        f"no_completion_for_{int(stagnation_no_completion_steps)}_steps"
+                    )
+                if (
+                    not stagnation_reason
+                    and stagnation_same_trigger_limit
+                    and last_non_null_trigger
+                    and same_trigger_streak >= int(stagnation_same_trigger_limit)
+                    and t >= max(0, int(stagnation_min_timestep or 0))
+                    and not task_pool.all_done()
+                ):
+                    stagnation_reason = (
+                        f"repeated_trigger_{last_non_null_trigger}_x{same_trigger_streak}"
+                    )
+                if stagnation_reason:
+                    statistics_dict["collection_stop_reason"] = stagnation_reason
+                    statistics_dict["collection_stop_timestep"] = t
+                    with open(filename, 'w') as f:
+                        json.dump(statistics_dict, f, indent=4)
+                    print(f"[CollectionEarlyStop] t={t} reason={stagnation_reason}")
+                    break
                 
                 if variant['test_mode'] == 'fix_task':
                     # P1: 多任务模式下，所有任务完成才算成功

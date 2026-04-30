@@ -28,6 +28,10 @@ dependencies/overcooked_ai/overcooked_ai_py/data/layouts/
 | `O` | 烤箱 (Oven) | 用于烘烤，操作类型：bake |
 | `C` | 切菜板 (Chopping Board) | 用于切菜，操作类型：cut |
 | `B` | 搅拌机 (Blender) | 用于搅拌，操作类型：stir |
+| `G` | 烤架 (Grill) | 语义上表示 grill，当前底层复用 bake |
+| `H` | 蒸锅 (Steamer) | 语义上表示 steamer，当前底层复用 cook |
+| `K` | 备菜台 (Prep Table) | 语义上表示 prep table，当前底层复用 cut |
+| `M` | 混合台 (Mixer) | 语义上表示 mixer，当前底层复用 stir |
 | `D` | 盘子供应处 (Dish Dispenser) | 获取盘子的地方 |
 | `S` | 服务台 (Serving Location) | 交付完成菜品的地方 |
 | `I` | 食材供应处 (Ingredients Dispenser) | 获取食材的地方 |
@@ -99,6 +103,10 @@ XXXBXSXX""",
         "chopping_board": {"symbol": "C", "operation": "cut"},
         "oven": {"symbol": "O", "operation": "bake"},
         "blender": {"symbol": "B", "operation": "stir"},
+        "grill": {"symbol": "G", "operation": "bake"},
+        "steamer": {"symbol": "H", "operation": "cook"},
+        "prep_table": {"symbol": "K", "operation": "cut"},
+        "mixer": {"symbol": "M", "operation": "stir"},
         "water": {"symbol": "W", "operation": "wash"},  // 需要添加
         "none": {"symbol": "N", "operation": "none"}
     },
@@ -113,6 +121,19 @@ XXXBXSXX""",
     // ... 其他配置（参考 cramped_room.layout）
 }
 ```
+
+说明：
+
+1. `G = Grill`，当前底层先复用 `bake`
+2. `H = Steamer`，当前底层先复用 `cook`
+3. `K = Prep Table`，当前底层先复用 `cut`
+4. `M = Mixer`，当前底层先复用 `stir`
+
+这样做的好处是：
+
+1. 地图和 Agent Card 语义上可以区分不同工具
+2. 底层交互逻辑和 recipe 系统不需要立即大改
+3. 后续如果要把 grill/oven、steamer/pot 的 recipe 完全拆开，可以再逐步扩展
 
 ### 步骤3: 添加 W 符号支持（如果需要）
 
@@ -133,7 +154,7 @@ def is_not_free(c):
 **修改后**:
 ```python
 def is_not_free(c):
-    return c in 'XOPDSTICBW'  # Add ingredient grid and water
+    return c in 'XOPCDSTIBWGHKM'  # Add ingredient grid, water, and heterogeneous tools
 ```
 
 **位置2**: 第1496行 - 验证字符有效性
@@ -145,7 +166,7 @@ assert all(c in 'XOPCDSTIB123456789 ' for c in all_elements), 'Invalid character
 
 **修改后**:
 ```python
-assert all(c in 'XOPCDSTIBW123456789 ' for c in all_elements), 'Invalid character in grid'
+assert all(c in 'XOPCDSTIBWGHKM123456789 ' for c in all_elements), 'Invalid character in grid'
 ```
 
 #### 3.2 添加 W 符号的处理逻辑

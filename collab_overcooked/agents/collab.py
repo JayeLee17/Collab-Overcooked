@@ -1,5 +1,5 @@
 import itertools, os, json, re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Union, Optional, List, Dict, Any
 import numpy as np
 import pkg_resources
@@ -109,6 +109,9 @@ class LLMAgents(LLMPair):
 
         self.prev_state = None
         self.auto_unstuck = auto_unstuck
+        self._local_no_progress_steps = 0
+        self._last_local_progress_action = None
+        self._auto_unstuck_threshold = 3
 
         self.current_ml_action = None
         self.current_ml_action_steps = 0
@@ -160,6 +163,7 @@ class LLMAgents(LLMPair):
         self.history_window = max(0, window_value)
         turn_statistics_dict_cp = copy.deepcopy(turn_statistics_dict)
         self.turn_statistics_dict = turn_statistics_dict_cp
+        self.enable_a2a_protocol = True
         # A2A Protocol: 旁路记录层（不影响任何现有逻辑）
         from collab_overcooked.a2a_protocol import A2AProtocol, InstructionRegistry
         self._a2a_protocol = A2AProtocol(agent_index=agent_index or 0)
@@ -433,6 +437,8 @@ class LLMAgents(LLMPair):
         self.planner.reset()
         # self.explainer.reset()
         self.prev_state = None
+        self._local_no_progress_steps = 0
+        self._last_local_progress_action = None
         self.current_ml_action = None
         self.current_ml_action_steps = 0
         self.time_to_wait = 0
@@ -527,6 +533,8 @@ class LLMAgents(LLMPair):
         self.current_ml_action_steps = 0
         self._stuck_same_action_steps = 0
         self._last_exec_snapshot = None
+        self._local_no_progress_steps = 0
+        self._last_local_progress_action = None
         # 清空待执行动作队列
         if hasattr(self, 'action_wait_parse'):
             while not self.action_wait_parse.empty():
@@ -712,11 +720,12 @@ class LLMAgents(LLMPair):
                         ),
                     )
                 elif key == "full":
-                    for rpe_name, rpe in self.mdp.recipes[utensil[:-1]].items():
-                        if set(
-                            self.mdp.utensil_state_dict[utensil]["soup"].state[0]
-                        ) == set(rpe["recipe"]):
-                            transition = rpe_name
+                    transition = self._infer_utensil_transition(
+                        state,
+                        utensil,
+                        self.mdp.utensil_state_dict[utensil]["soup"].state[0],
+                        require_exact=True,
+                    ) or "a valid recipe"
                     kitchen_state_prompt += prompt_dict[key].format(
                         utensil_name=utensil,
                         food=self._format_food_description(
@@ -725,18 +734,12 @@ class LLMAgents(LLMPair):
                         transition=transition,
                     )
                 elif key == "partially_full":
-                    for rpe_name, rpe in self.mdp.recipes[utensil[:-1]].items():
-                        if (
-                            len(
-                                set(
-                                    self.mdp.utensil_state_dict[utensil]["soup"].state[
-                                        0
-                                    ]
-                                ).intersection(set(rpe["recipe"]))
-                            )
-                            > 0
-                        ):
-                            transition = rpe_name
+                    transition = self._infer_utensil_transition(
+                        state,
+                        utensil,
+                        self.mdp.utensil_state_dict[utensil]["soup"].state[0],
+                        require_exact=False,
+                    ) or "an active recipe"
                     kitchen_state_prompt += prompt_dict[key].format(
                         utensil_name=utensil,
                         food=self._format_food_description(
@@ -823,14 +826,31 @@ class LLMAgents(LLMPair):
         order_text = (self.order or "").strip()
         if order_text.lower().startswith("order:"):
             order_text = order_text.split(":", 1)[1].strip()
-        if not self.mdp.one_task_mode and len(state.current_k_order) > 1:
-            tail_orders = [
-                o.strip()
-                for o in state.current_k_order[1:]
-                if isinstance(o, str) and o.strip()
-            ]
-            if tail_orders:
-                order_text += "".join(f"<<{o}" for o in tail_orders)
+        if not self.mdp.one_task_mode:
+            # Build order list from TaskPool (authoritative), NOT state.current_k_order
+            # which can mismatch when scheduler assigns tasks out of FIFO order.
+            other_orders: list = []
+            if self.task_pool is not None:
+                for t in getattr(self.task_pool, "tasks", []):
+                    if t.get("status") == "completed":
+                        continue
+                    t_order = str(t.get("order", "")).strip()
+                    if t_order and t_order != order_text:
+                        other_orders.append(t_order)
+            else:
+                # Fallback: no task_pool → use env order list (legacy behavior)
+                other_orders = [
+                    o.strip()
+                    for o in state.current_k_order
+                    if isinstance(o, str) and o.strip() and o.strip() != order_text
+                ]
+            if other_orders:
+                order_text += "".join(f"<<{o}" for o in other_orders)
+
+        if getattr(self, "use_global_scheduler", False):
+            print(f"[OrderDebug] A{self.agent_index} self.order={self.order!r} "
+                  f"order_text={order_text!r} "
+                  f"env_k_order={list(state.current_k_order) if hasattr(state,'current_k_order') else '?'}")
 
         # --- TaskPool 状态注入 Observation ---
         task_pool_prompt = ""
@@ -1132,6 +1152,178 @@ class LLMAgents(LLMPair):
                 )
         return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
+    def _get_conflict_wait_reason(self, action_str=None):
+        """Return a wait reason when *action_str* loses a utensil conflict."""
+        if self.task_pool is None:
+            return None
+        target = self._extract_target_utensil(action_str)
+        if not target:
+            return None
+
+        all_agents = [self] + list(getattr(self, 'teammates', []))
+        agent_plans = {}
+        for ag in all_agents:
+            ag_idx = getattr(ag, 'agent_index', None)
+            if ag_idx is None:
+                continue
+            candidate_action = action_str if ag_idx == self.agent_index else getattr(ag, "current_ml_action", None)
+            utensil = ag._extract_target_utensil(candidate_action) if hasattr(ag, "_extract_target_utensil") else None
+            if utensil:
+                agent_plans[ag_idx] = utensil
+
+        if not agent_plans:
+            return None
+
+        advice = self.task_pool.get_conflict_resolution(agent_plans)
+        wait_advice = advice.get(self.agent_index)
+        if wait_advice:
+            contenders = sorted(
+                ag_idx for ag_idx, utensil in agent_plans.items() if utensil == target
+            )
+            priority = contenders[0] if contenders else self.agent_index
+            return (
+                f"Utensil conflict: {target} is targeted by multiple agents. "
+                f"A{priority} has priority, so you should wait until {target} is free.\n"
+            )
+        return None
+
+    def _running_action_should_yield(self, state):
+        """Return a blocking reason if the current utensil action should stop and wait."""
+        action_str = self.current_ml_action
+        if not action_str:
+            return None
+        target = self._extract_target_utensil(action_str)
+        if not target:
+            return None
+
+        conflict_reason = self._get_conflict_wait_reason(action_str)
+        if conflict_reason:
+            return conflict_reason
+
+        utensil_state = self.mdp.get_utensil_states(state)
+        action_name, _ = self.parse_params_in_action(action_str)
+        if action_name == "put_obj_in_utensil":
+            if target in utensil_state["cooking"] or target in utensil_state["ready"]:
+                return f"{target} is busy. You should wait until it becomes available.\n"
+            if target not in utensil_state["empty"]:
+                utensil_order = str(
+                    self.mdp.utensil_state_dict.get(target, {}).get("order", "") or ""
+                )
+                if utensil_order and self.order and utensil_order != self.order:
+                    return (
+                        f"{target} is currently occupied by another task ({utensil_order}). "
+                        "You should wait until the current item is removed.\n"
+                    )
+                if target.startswith(("chopping_board", "blender", "oven")):
+                    return (
+                        f"{target} still holds an unfinished item. You should wait until it is picked up.\n"
+                    )
+        return None
+
+    def _agent_ref_by_index(self, agent_index):
+        if agent_index == self.agent_index:
+            return self
+        for teammate in getattr(self, "teammates", []):
+            if getattr(teammate, "agent_index", None) == agent_index:
+                return teammate
+        return None
+
+    def _is_delivery_priority_actor(self, state, agent_index, agent_ref=None):
+        if state is None or agent_index is None or agent_index >= len(state.players):
+            return False
+        if agent_ref is None:
+            agent_ref = self._agent_ref_by_index(agent_index)
+        action_str = str(getattr(agent_ref, "current_ml_action", "") or "").lower()
+        if "deliver_soup" in action_str or "fill_dish_with_food" in action_str:
+            return True
+        player = state.players[agent_index]
+        held = player.held_object.name.lower() if player.held_object else ""
+        if held and (
+            any(k in held for k in ("soup", "stew", "patty", "boiled", "baked", "mashed"))
+            or "dish" in held
+        ):
+            return True
+        return False
+
+    def _movement_priority_key(self, state, agent_index, agent_ref=None):
+        is_delivery = self._is_delivery_priority_actor(state, agent_index, agent_ref)
+        return (0 if is_delivery else 1, int(agent_index))
+
+    def _choose_yield_motion_action(self, state, blocker_idx, blocked_action):
+        player = state.players[self.agent_index]
+        blocker = state.players[blocker_idx]
+        valid_actions = self.mdp.get_valid_actions(player)
+        motion_actions = [a for a in valid_actions if a in Action.MOTION_ACTIONS and a != Action.STAY]
+        if not motion_actions:
+            return None
+
+        dx = blocker.position[0] - player.position[0]
+        dy = blocker.position[1] - player.position[1]
+        preferred = []
+        if abs(dx) >= abs(dy) and dx != 0:
+            preferred = [Direction.NORTH, Direction.SOUTH]
+        elif dy != 0:
+            preferred = [Direction.EAST, Direction.WEST]
+
+        blocked_next = None
+        if blocked_action in Action.MOTION_ACTIONS:
+            blocked_next = Action.move_in_direction(player.position, blocked_action)
+
+        def _valid_candidate(action):
+            next_pos = Action.move_in_direction(player.position, action)
+            if next_pos == blocker.position:
+                return False
+            if blocked_next is not None and next_pos == blocked_next:
+                return False
+            return True
+
+        for action in preferred:
+            if action in motion_actions and _valid_candidate(action):
+                return action
+
+        for action in motion_actions:
+            if action != blocked_action and _valid_candidate(action):
+                return action
+        return None
+
+    def _resolve_corridor_deadlock(self, state, chosen_action):
+        if state is None or chosen_action not in Action.MOTION_ACTIONS or chosen_action == Action.STAY:
+            return False, chosen_action, ""
+        my_player = state.players[self.agent_index]
+        my_pos = my_player.position
+        next_pos = Action.move_in_direction(my_pos, chosen_action)
+
+        adjacent_blockers = []
+        for other_idx, other_player in enumerate(state.players):
+            if other_idx == self.agent_index:
+                continue
+            if abs(other_player.position[0] - my_pos[0]) + abs(other_player.position[1] - my_pos[1]) != 1:
+                continue
+            if other_player.position == next_pos:
+                adjacent_blockers.append(other_idx)
+
+        if not adjacent_blockers:
+            return False, chosen_action, ""
+
+        blocker_idx = min(
+            adjacent_blockers,
+            key=lambda idx: self._movement_priority_key(
+                state, idx, self._agent_ref_by_index(idx)
+            ),
+        )
+        my_key = self._movement_priority_key(state, self.agent_index, self)
+        blocker_key = self._movement_priority_key(
+            state, blocker_idx, self._agent_ref_by_index(blocker_idx)
+        )
+
+        if my_key <= blocker_key:
+            return True, chosen_action, f"keep_priority_over_A{blocker_idx}"
+
+        yield_action = self._choose_yield_motion_action(state, blocker_idx, chosen_action)
+        if yield_action is not None:
+            return True, yield_action, f"yield_to_A{blocker_idx}"
+        return True, Action.STAY, f"wait_for_A{blocker_idx}"
+
     ##################
     """
 	The followings are the Planner part
@@ -1171,6 +1363,10 @@ class LLMAgents(LLMPair):
         # Update order: 只使用自己认领任务的 order。无任务时置空，避免插手其他任务。
         task_order = self._get_my_task_order()
         effective_order = task_order if task_order else ""
+        old_order = getattr(self, "order", "")
+        if old_order != effective_order:
+            print(f"[TaskSwitch] A{self.agent_index} old_order={old_order!r} "
+                  f"new_order={effective_order!r}")
         self.order = effective_order
         # 同步队友自己的任务 order（不要覆盖成当前 agent 的 order）
         if hasattr(self, 'teammates'):
@@ -1256,11 +1452,36 @@ class LLMAgents(LLMPair):
                 self._last_exec_snapshot = None
                 self.current_ml_action = self.generate_ml_action(state)
             else:
-                # Protective reset: if place action keeps repeating with same local state, force replanning.
-                if self.current_ml_action and "place_obj_on_counter" in self.current_ml_action:
-                    p = state.players[self.agent_index]
-                    held = p.get_object().name if p.has_object() else ""
-                    snapshot = (self.current_ml_action, p.position, p.orientation, held)
+                yield_reason = self._running_action_should_yield(state)
+                if yield_reason:
+                    self.current_ml_action = "wait(1)"
+                    self.current_ml_action_steps = 0
+                    self.time_to_wait = 1
+                    self.failed_message = yield_reason
+                    self._stuck_same_action_steps = 0
+                    self._last_exec_snapshot = None
+                elif self.current_ml_action:
+                    running_action_name, _ = self.parse_params_in_action(
+                        self.current_ml_action
+                    )
+                    if running_action_name == "put_obj_in_utensil":
+                        running_validation = self.validate_current_ml_action(state)
+                        if (
+                            "success" not in running_validation
+                            and "wait" not in running_validation
+                        ):
+                            self.current_ml_action_steps = 0
+                            self.failed_message = running_validation
+                            self._stuck_same_action_steps = 0
+                            self._last_exec_snapshot = None
+                # Protective reset: if a manipulation action repeats with exactly the same
+                # local state and utensil/object state, force replanning instead of letting
+                # the stale action run forever.
+                if self.current_ml_action and (
+                    "place_obj_on_counter" in self.current_ml_action
+                    or "put_obj_in_utensil" in self.current_ml_action
+                ):
+                    snapshot = self._build_running_action_snapshot(state)
                     if self._last_exec_snapshot == snapshot:
                         self._stuck_same_action_steps += 1
                     else:
@@ -1268,7 +1489,7 @@ class LLMAgents(LLMPair):
                     self._last_exec_snapshot = snapshot
                     if self._stuck_same_action_steps >= 4:
                         print(
-                            f"[WARN A{self.agent_index}] place_obj_on_counter() no progress for "
+                            f"[WARN A{self.agent_index}] {self.current_ml_action} no progress for "
                             f"{self._stuck_same_action_steps + 1} steps, force replanning."
                         )
                         self.current_ml_action = None
@@ -1388,36 +1609,89 @@ class LLMAgents(LLMPair):
         # 	print(f'current motion goal for P{self.agent_index} is {current_motion_goal}')
 
         if self.auto_unstuck and chosen_action != Action.INTERACT:
-            if self.prev_state is not None and state.players == self.prev_state.players:
-                num_players = len(state.players)
-                # 构建 joint_actions: 自己尝试所有动作，其余玩家 STAY
-                action_slots = []
-                for p_idx in range(num_players):
-                    if p_idx == self.agent_index:
-                        action_slots.append(Action.ALL_ACTIONS)
+            local_progress_blocked = False
+            if self.prev_state is not None and self.current_ml_action and "wait" not in self.current_ml_action:
+                player = state.players[self.agent_index]
+                prev_player = self.prev_state.players[self.agent_index]
+                held = player.held_object.name if player.held_object else ""
+                prev_held = prev_player.held_object.name if prev_player.held_object else ""
+                same_local_state = (
+                    player.position == prev_player.position
+                    and player.orientation == prev_player.orientation
+                    and held == prev_held
+                )
+                same_action = self.current_ml_action == self._last_local_progress_action
+                if same_local_state and same_action:
+                    self._local_no_progress_steps += 1
                 else:
-                        action_slots.append([Action.STAY])
-                joint_actions = list(itertools.product(*action_slots))
+                    self._local_no_progress_steps = 0
+                local_progress_blocked = (
+                    self._local_no_progress_steps >= self._auto_unstuck_threshold
+                )
+            else:
+                self._local_no_progress_steps = 0
 
-                unblocking_joint_actions = []
-                for j_a in joint_actions:
-                    # 排除所有人都 INTERACT/STAY 的无效组合
-                    if j_a[self.agent_index] != Action.INTERACT:
-                        # Use version 0.0.1 logic (from dependencies/overcooked_ai)
-                        new_state, _, _ = self.mlam.mdp.get_state_transition(
-                            state, j_a
+            if local_progress_blocked:
+                print(
+                    f"[AutoUnstuck A{self.agent_index}] local deadlock detected for "
+                    f"{self._local_no_progress_steps + 1} steps on action={self.current_ml_action}"
+                )
+                resolved, priority_action, priority_reason = self._resolve_corridor_deadlock(
+                    state, chosen_action
+                )
+                if resolved:
+                    if priority_reason.startswith("yield_to_"):
+                        print(
+                            f"[AutoUnstuck A{self.agent_index}] corridor yield: "
+                            f"{priority_reason}, action={Action.to_char(priority_action)}"
                         )
-                        if (
-                            new_state.players_pos_and_or
-                            != self.prev_state.players_pos_and_or
-                        ):
-                            unblocking_joint_actions.append(j_a)
-                stay_action = tuple([Action.STAY] * num_players)
-                unblocking_joint_actions.append(stay_action)
-                chosen_action = unblocking_joint_actions[
-                    np.random.choice(len(unblocking_joint_actions))
-                ][self.agent_index]
+                    elif priority_reason.startswith("wait_for_"):
+                        print(
+                            f"[AutoUnstuck A{self.agent_index}] corridor wait: "
+                            f"{priority_reason}"
+                        )
+                        self.current_ml_action = "wait(1)"
+                        self.current_ml_action_steps = 0
+                        self.time_to_wait = 1
+                    elif priority_reason.startswith("keep_priority_over_"):
+                        print(
+                            f"[AutoUnstuck A{self.agent_index}] corridor priority: "
+                            f"{priority_reason}, keep action={Action.to_char(priority_action)}"
+                        )
+                    chosen_action = priority_action
+                    self._local_no_progress_steps = 0
+                else:
+                    num_players = len(state.players)
+                    # 构建 joint_actions: 自己尝试所有动作，其余玩家 STAY
+                    action_slots = []
+                    for p_idx in range(num_players):
+                        if p_idx == self.agent_index:
+                            action_slots.append(Action.ALL_ACTIONS)
+                        else:
+                            action_slots.append([Action.STAY])
+                    joint_actions = list(itertools.product(*action_slots))
 
+                    unblocking_joint_actions = []
+                    for j_a in joint_actions:
+                        # 排除所有人都 INTERACT/STAY 的无效组合
+                        if j_a[self.agent_index] != Action.INTERACT:
+                            # Use version 0.0.1 logic (from dependencies/overcooked_ai)
+                            new_state, _, _ = self.mlam.mdp.get_state_transition(
+                                state, j_a
+                            )
+                            if (
+                                new_state.players_pos_and_or
+                                != state.players_pos_and_or
+                            ):
+                                unblocking_joint_actions.append(j_a)
+                    stay_action = tuple([Action.STAY] * num_players)
+                    unblocking_joint_actions.append(stay_action)
+                    chosen_action = unblocking_joint_actions[
+                        np.random.choice(len(unblocking_joint_actions))
+                    ][self.agent_index]
+                    self._local_no_progress_steps = 0
+
+        self._last_local_progress_action = self.current_ml_action
         self.prev_state = state
         if chosen_action is None:
             self.current_ml_action = "wait(1)"
@@ -1673,6 +1947,8 @@ class LLMAgents(LLMPair):
         - ACCEPT / INFORM / REJECT        → 打印协议事件，更新状态
         返回 None 表示无 A2A 驱动的动作。
         """
+        if not getattr(self, "enable_a2a_protocol", True):
+            return None
         try:
             from collab_overcooked.a2a_protocol.message import (
                 MessageType, create_accept_message,
@@ -1731,11 +2007,17 @@ class LLMAgents(LLMPair):
 
                 elif msg.type == MessageType.INFORM:
                     content = msg.content or {}
+                    inform_action = content.get("action", "")
                     print(
                         f"[A2A] t={timestep} A{self.agent_index} ← INFORM(A{msg.from_}) "
-                        f"action='{content.get('action', '')}' "
-                        f"status='{content.get('status', '')}'"
+                        f"action='{inform_action}' "
+                        f"task_id={content.get('task_id', '?')} "
+                        f"reason='{content.get('reason', '')}'"
                     )
+                    if inform_action == "cancel_assignment":
+                        print(f"[TaskSwitch] A{self.agent_index} received cancel_assignment "
+                              f"for task={content.get('task_id', '?')} — "
+                              f"will pick up new task from pool next step")
 
                 elif msg.type == MessageType.REJECT:
                     content = msg.content or {}
@@ -1751,6 +2033,8 @@ class LLMAgents(LLMPair):
         """
         当 A2A 驱动的动作完成后，向请求方发送 INFORM(completed) 消息。
         """
+        if not getattr(self, "enable_a2a_protocol", True):
+            return
         if not self._a2a_pending_instruction or self._a2a_source_agent is None:
             return
         try:
@@ -1823,6 +2107,8 @@ class LLMAgents(LLMPair):
           Collab(deny(...))     →  REJECT
           其他 talk             →  INFORM
         """
+        if not getattr(self, "enable_a2a_protocol", True):
+            return
         if not talk_text or not isinstance(talk_text, str):
             return
         try:
@@ -2237,6 +2523,85 @@ class LLMAgents(LLMPair):
                 return items[0]
             return ", ".join(items)
         return str(food_state)
+
+    def _get_active_recipe_candidates(self, state, utensil_type):
+        candidates = []
+        seen = set()
+        recipe_dict = self.mdp.recipes.get(utensil_type, {})
+
+        def _maybe_add(order_name):
+            if not order_name or order_name in seen:
+                return
+            if order_name not in recipe_dict:
+                return
+            seen.add(order_name)
+            candidates.append(order_name)
+
+        _maybe_add(self.order)
+
+        if self.task_pool is not None:
+            for task in getattr(self.task_pool, "tasks", []) or []:
+                if str(task.get("status", "")).lower() == "completed":
+                    continue
+                _maybe_add(task.get("order"))
+
+        if hasattr(state, "current_k_order") and state.current_k_order:
+            for order_name in state.current_k_order:
+                _maybe_add(order_name)
+
+        for recipe_name in recipe_dict.keys():
+            _maybe_add(recipe_name)
+
+        return candidates
+
+    def _infer_utensil_transition(self, state, utensil_name, food_state, require_exact=False):
+        utensil_type = utensil_name[:-1]
+        recipe_dict = self.mdp.recipes.get(utensil_type, {})
+        if not recipe_dict:
+            return None
+
+        if isinstance(food_state, str):
+            return food_state if food_state in recipe_dict else None
+
+        ingredients = [str(x) for x in (food_state or []) if str(x)]
+        if not ingredients:
+            return None
+        ingredient_counter = Counter(ingredients)
+
+        ranked = []
+        active_candidates = self._get_active_recipe_candidates(state, utensil_type)
+        active_rank = {name: idx for idx, name in enumerate(active_candidates)}
+
+        for recipe_name, recipe_detail in recipe_dict.items():
+            recipe_counter = Counter(recipe_detail.get("recipe", []))
+            exact = ingredient_counter == recipe_counter
+            subset = all(
+                ingredient_counter[item] <= recipe_counter[item]
+                for item in ingredient_counter
+            )
+            if require_exact and not exact:
+                continue
+            if not require_exact and not subset:
+                continue
+
+            overlap = sum((ingredient_counter & recipe_counter).values())
+            missing = sum((recipe_counter - ingredient_counter).values())
+            ranked.append(
+                (
+                    0 if recipe_name == self.order else 1,
+                    active_rank.get(recipe_name, 10_000),
+                    0 if exact else 1,
+                    missing,
+                    -overlap,
+                    len(recipe_detail.get("recipe", [])),
+                    recipe_name,
+                )
+            )
+
+        if not ranked:
+            return None
+        ranked.sort()
+        return ranked[0][-1]
 
     def record_history_entry(self, think_text: str, recent_goal_text: str, action_text: str, error_text: str = ""):
         if not self.current_observation_snapshot:
@@ -3513,6 +3878,11 @@ class LLMAgents(LLMPair):
                 player.has_object()
                 and player.get_object().name == self.parse_action_params[0]
             )
+        elif self.parse_action == "put_obj_in_utensil":
+            # Putting an ingredient succeeds as soon as it leaves the player's hand.
+            # Waiting for the utensil to enter "cooking" is too strict for multi-ingredient
+            # recipes such as stew/soup, where the second ingredient is added before cooking starts.
+            return (not player.has_object()) or state.error_message != []
         elif any(s in self.current_ml_action for s in self.mdp.interact_actions):
             return (
                 self.parse_action_params[0]
@@ -3554,6 +3924,35 @@ class LLMAgents(LLMPair):
                         valide = False
         return valide or not (self.mdp.need_dish[food] == 1)
 
+    def _get_utensil_object_signature(self, state, utensil_name):
+        if not utensil_name:
+            return ("", None)
+        utensil_meta = self.mdp.utensil_state_dict.get(utensil_name, {})
+        obj_position = utensil_meta.get("position")
+        if obj_position is None:
+            return ("", None)
+        pos = tuple(obj_position)
+        if not state.has_object(pos):
+            return ("EMPTY", None)
+        obj = state.get_object(pos)
+        obj_name = getattr(obj, "name", "")
+        obj_state = copy.deepcopy(getattr(obj, "state", None))
+        return (obj_name, obj_state)
+
+    def _build_running_action_snapshot(self, state):
+        player = state.players[self.agent_index]
+        held = player.held_object.name if player.held_object else ""
+        target = self._extract_target_utensil(self.current_ml_action)
+        utensil_sig = self._get_utensil_object_signature(state, target)
+        return (
+            self.current_ml_action,
+            player.position,
+            player.orientation,
+            held,
+            target,
+            utensil_sig,
+        )
+
     def validate_current_ml_action(self, state):
         """
         make sure the current_ml_action exists and is valid
@@ -3582,6 +3981,10 @@ class LLMAgents(LLMPair):
         elif "wait" in format_error_message:
             self.current_ml_action = format_error_message
             return failed_message
+
+        conflict_reason = self._get_conflict_wait_reason(self.current_ml_action)
+        if conflict_reason:
+            return conflict_reason
         # Assessing the logical Soundness of actions
         if "pickup" in self.parse_action:
             if (self.parse_action_params[1] in self.mdp.utensil_list) and (
@@ -3654,12 +4057,27 @@ class LLMAgents(LLMPair):
             # check if the food in utensil is full
             if not self.parse_action_params:
                 return "Wrong put_obj_in_utensil() params. It should have 1 params: utensil.\n"
+            utensil_name = self.parse_action_params[0]
             if self.parse_action_params[0] in utensil_state["cooking"]:
                 failed_message = f"{self.actor} can not put obj into  {self.parse_action_params[0]}. The utensil {self.parse_action_params[0]} is cooking, and you should wait for it is ready.\n"
                 return failed_message
             if self.parse_action_params[0] in utensil_state["ready"]:
                 failed_message = f"{self.actor} can not put obj into  {self.parse_action_params[0]}. The utensil {self.parse_action_params[0]} is ready, and you should pick up it or fill with dish according to the recipe.\n"
                 return failed_message
+            if utensil_name not in utensil_state["empty"]:
+                utensil_order = str(
+                    self.mdp.utensil_state_dict.get(utensil_name, {}).get("order", "") or ""
+                )
+                if utensil_order and self.order and utensil_order != self.order:
+                    return (
+                        f"{utensil_name} is currently occupied by another task ({utensil_order}). "
+                        "You should wait until the current item is removed.\n"
+                    )
+                if utensil_name.startswith(("chopping_board", "blender", "oven")):
+                    return (
+                        f"{utensil_name} still has an unfinished item on it. "
+                        "You should wait until it is picked up.\n"
+                    )
             # if  self.parse_action_params[0] in utensil_state['full']:
             # 	return f"The {self.parse_action_params[0]} is full. You can not put more ingredients in it.\n"
 

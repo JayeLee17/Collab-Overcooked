@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight SFT runner for Qwen2.5 models using exported JSONL data.
+Lightweight SFT runner for Qwen models using exported JSONL data.
 
 Example:
     python scripts/train_qwen_sft.py \
@@ -15,8 +15,11 @@ Example:
         --use-lora \
         --agents Chef Assistant
 
-The script will train one LoRA head per agent and store results under
-`<output-dir>/<timestamp>/<AgentName>/`.
+The script can either:
+1. train one LoRA head per agent and store results under
+   `<output-dir>/<timestamp>/<AgentName>/`, or
+2. train a single scheduler model on the full dataset under
+   `<output-dir>/<timestamp>/<TargetName>/`.
 """
 
 from __future__ import annotations
@@ -107,8 +110,18 @@ def parse_args() -> argparse.Namespace:
         "--agents",
         nargs="*",
         default=["Chef", "Assistant"],
-        choices=["Chef", "Assistant"],
         help="Agent roles to train (each receives its own LoRA head).",
+    )
+    parser.add_argument(
+        "--dataset-mode",
+        choices=["agent", "single"],
+        default="agent",
+        help="Use 'agent' for Chef/Assistant datasets, or 'single' for one shared target such as Scheduler.",
+    )
+    parser.add_argument(
+        "--single-target-name",
+        default="Scheduler",
+        help="Output subdirectory name when --dataset-mode single is used.",
     )
     parser.add_argument("--gradient-checkpointing", action="store_true")
     return parser.parse_args()
@@ -144,16 +157,42 @@ def format_example(example: Dict, tokenizer: AutoTokenizer, max_length: int) -> 
     system_prompt = example.get("system")
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": example.get("prompt", "")})
-    messages.append({"role": "assistant", "content": example.get("response", "")})
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    tokenized = tokenizer(
-        text,
-        truncation=True,
-        max_length=max_length,
+    user_prompt = example.get("prompt", "")
+    assistant_response = example.get("response", "")
+
+    prompt_messages = [*messages, {"role": "user", "content": user_prompt}]
+    full_messages = [*prompt_messages, {"role": "assistant", "content": assistant_response}]
+
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
-    tokenized["labels"] = tokenized["input_ids"].copy()
-    return tokenized
+    full_text = tokenizer.apply_chat_template(
+        full_messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False).input_ids
+    full_ids = tokenizer(full_text, add_special_tokens=False).input_ids
+
+    if len(full_ids) > max_length:
+        overflow = len(full_ids) - max_length
+        full_ids = full_ids[overflow:]
+        prompt_len = max(0, len(prompt_ids) - overflow)
+    else:
+        prompt_len = len(prompt_ids)
+
+    labels = full_ids.copy()
+    for i in range(min(prompt_len, len(labels))):
+        labels[i] = -100
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
+    }
 
 
 def maybe_split_dataset(ds: datasets.Dataset, ratio: float, seed: int) -> Dict[str, datasets.Dataset]:
@@ -180,6 +219,19 @@ def filter_dataset_by_agent(ds: Optional[datasets.Dataset], agent: str) -> Optio
     if ds is None:
         return None
     return ds.filter(lambda example: extract_agent_from_meta(example.get("meta")) == agent)
+
+
+def select_dataset_for_target(
+    ds: Optional[datasets.Dataset],
+    *,
+    dataset_mode: str,
+    target_name: str,
+) -> Optional[datasets.Dataset]:
+    if ds is None:
+        return None
+    if dataset_mode == "single":
+        return ds
+    return filter_dataset_by_agent(ds, target_name)
 
 
 def _should_enable_device_map_auto() -> bool:
@@ -336,9 +388,6 @@ def main() -> None:
     base_eval_dataset = dataset_dict.get("eval")
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    target_agents = args.agents or []
-    if not target_agents:
-        target_agents = ["Chef", "Assistant"]
 
     base_training_kwargs = dict(
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -359,30 +408,45 @@ def main() -> None:
     if "save_strategy" in sig_params:
         base_training_kwargs["save_strategy"] = "epoch"
 
-    trained_agents: List[str] = []
-    for agent in target_agents:
-        agent_train = filter_dataset_by_agent(base_train_dataset, agent)
+    if args.dataset_mode == "single":
+        target_agents = [args.single_target_name]
+    else:
+        target_agents = args.agents or []
+        if not target_agents:
+            target_agents = ["Chef", "Assistant"]
+
+    trained_targets: List[str] = []
+    for target_name in target_agents:
+        agent_train = select_dataset_for_target(
+            base_train_dataset,
+            dataset_mode=args.dataset_mode,
+            target_name=target_name,
+        )
         if agent_train is None or len(agent_train) == 0:
-            print(f"[train] Skip agent {agent}: no training samples found.")
+            print(f"[train] Skip target {target_name}: no training samples found.")
             continue
-        agent_eval = filter_dataset_by_agent(base_eval_dataset, agent)
+        agent_eval = select_dataset_for_target(
+            base_eval_dataset,
+            dataset_mode=args.dataset_mode,
+            target_name=target_name,
+        )
         if agent_eval is not None and len(agent_eval) == 0:
             agent_eval = None
 
         tokenized_train = agent_train.map(
             preprocess,
             remove_columns=agent_train.column_names,
-            desc=f"Tokenizing train set ({agent})",
+            desc=f"Tokenizing train set ({target_name})",
         )
         tokenized_eval = None
         if agent_eval is not None:
             tokenized_eval = agent_eval.map(
                 preprocess,
                 remove_columns=agent_eval.column_names,
-                desc=f"Tokenizing eval set ({agent})",
+                desc=f"Tokenizing eval set ({target_name})",
             )
 
-        agent_run_dir = run_dir / agent.replace(" ", "_")
+        agent_run_dir = run_dir / target_name.replace(" ", "_")
         agent_run_dir.mkdir(parents=True, exist_ok=True)
 
         training_kwargs = dict(base_training_kwargs)
@@ -414,7 +478,7 @@ def main() -> None:
         tokenizer.save_pretrained(str(agent_run_dir))
         if args.plot_metrics:
             save_metric_plots(trainer.state.log_history, agent_run_dir)
-        trained_agents.append(agent)
+        trained_targets.append(target_name)
         del trainer
         del model
         try:
@@ -424,9 +488,9 @@ def main() -> None:
         except Exception:
             pass
 
-    if not trained_agents:
-        raise RuntimeError("No agents were trained; please verify datasets and --agents selection.")
-    print(f"[train] Finished SFT for agents: {', '.join(trained_agents)}. Results saved under {run_dir}.")
+    if not trained_targets:
+        raise RuntimeError("No targets were trained; please verify datasets and training mode.")
+    print(f"[train] Finished SFT for targets: {', '.join(trained_targets)}. Results saved under {run_dir}.")
 
 
 if __name__ == "__main__":

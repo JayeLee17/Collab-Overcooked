@@ -204,6 +204,10 @@ class Row:
     orders: str
     completed: int
     total_score: float
+    env_score: float
+    progress_score: float
+    blocked_count: int
+    system_score: float
     score_per_step: Optional[float]
     wait_ratio: Optional[float]
     # scheduler
@@ -264,6 +268,10 @@ def load_one(path: str) -> Row:
     # completion & score
     completed = len(d.get("total_order_finished", []) or [])
     total_score = float(d.get("total_score", 0) or 0)
+    env_score = float(d.get("env_score", total_score) or 0)
+    progress_score = float(d.get("progress_score", 0) or 0)
+    blocked_count = int(d.get("blocked_count", 0) or 0)
+    system_score = float(d.get("system_score", (env_score + progress_score - blocked_count)) or 0)
     score_per_step = _safe_div(total_score, T) if T else None
 
     # scheduler summary
@@ -285,6 +293,10 @@ def load_one(path: str) -> Row:
         orders=orders_str,
         completed=completed,
         total_score=total_score,
+        env_score=env_score,
+        progress_score=progress_score,
+        blocked_count=blocked_count,
+        system_score=system_score,
         score_per_step=score_per_step,
         wait_ratio=wait_ratio,
         gs_enabled=gs_sum["gs_enabled"],
@@ -338,6 +350,10 @@ def write_md(rows: List[Row], out_path: str) -> None:
             "n": len(rs),
             "completed_mean": _mean([r.completed for r in rs]),
             "score_mean": _mean([r.total_score for r in rs]),
+            "env_score_mean": _mean([r.env_score for r in rs]),
+            "progress_score_mean": _mean([r.progress_score for r in rs]),
+            "blocked_count_mean": _mean([r.blocked_count for r in rs]),
+            "system_score_mean": _mean([r.system_score for r in rs]),
             "score_per_step_mean": _mean([r.score_per_step for r in rs]),
             "wait_ratio_mean": _mean([r.wait_ratio for r in rs]),
             "a2a_msgs_mean": _mean([r.a2a_total_messages for r in rs]),
@@ -349,8 +365,8 @@ def write_md(rows: List[Row], out_path: str) -> None:
     lines: List[str] = []
     lines.append("## Experiment summary (aggregated)\n")
     lines.append("Each cell is the mean over matching runs.\n")
-    lines.append("| Exp | Mode | n | completed | score | score/step | wait_ratio | a2a_msgs | gs_triggers | llm_used | llm_fallback |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| Exp | Mode | n | completed | score | env_score | progress_score | blocked_count | system_score | score/step | wait_ratio | a2a_msgs | gs_triggers | llm_used | llm_fallback |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for exp_id in sorted(grouped.keys(), key=lambda s: (len(s), s)):
         for mode in ["off", "rule", "llm", "unknown"]:
             if mode not in grouped[exp_id]:
@@ -365,6 +381,10 @@ def write_md(rows: List[Row], out_path: str) -> None:
                         str(a["n"]),
                         _fmt(a["completed_mean"]),
                         _fmt(a["score_mean"]),
+                        _fmt(a["env_score_mean"]),
+                        _fmt(a["progress_score_mean"]),
+                        _fmt(a["blocked_count_mean"]),
+                        _fmt(a["system_score_mean"]),
                         _fmt(a["score_per_step_mean"]),
                         _fmt(a["wait_ratio_mean"]),
                         _fmt(a["a2a_msgs_mean"]),
@@ -377,8 +397,8 @@ def write_md(rows: List[Row], out_path: str) -> None:
             )
 
     lines.append("\n## Per-run details\n")
-    lines.append("| run_id | mode | T | agents | orders | completed | score | score/step | wait_ratio | a2a_msgs | gs_triggers | llm_used | llm_fallback | result_path |")
-    lines.append("|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    lines.append("| run_id | mode | T | agents | orders | completed | score | env_score | progress_score | blocked_count | system_score | score/step | wait_ratio | a2a_msgs | gs_triggers | llm_used | llm_fallback | result_path |")
+    lines.append("|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
     for r in sorted(rows, key=lambda x: (x.exp_id or "Z", x.mode or "Z", x.run_id)):
         lines.append(
             "| "
@@ -391,6 +411,10 @@ def write_md(rows: List[Row], out_path: str) -> None:
                     r.orders,
                     str(r.completed),
                     _fmt(r.total_score),
+                    _fmt(r.env_score),
+                    _fmt(r.progress_score),
+                    _fmt(r.blocked_count),
+                    _fmt(r.system_score),
                     _fmt(r.score_per_step),
                     _fmt(r.wait_ratio),
                     str(r.a2a_total_messages),
